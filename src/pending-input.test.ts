@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPendingQuestionnaireResponse,
   buildPendingPromptText,
   buildPendingUserInputActions,
   createPendingInputState,
+  formatPendingQuestionnairePrompt,
   parseCodexUserInput,
+  parsePendingQuestionnaire,
+  questionnaireIsComplete,
   requestToken,
 } from "./pending-input.js";
 
@@ -62,5 +66,57 @@ describe("pending-input helpers", () => {
     });
     expect(text.length).toBeLessThan(2400);
     expect(text).toContain("[Prompt truncated for chat delivery.");
+  });
+
+  it("parses multi-question plan prompts into a questionnaire state", () => {
+    const questionnaire = parsePendingQuestionnaire(`
+1. What do you want the final artifact to be?
+
+• A Single static binary
+• B Normal runtime-managed CLI
+
+Guidance:
+• A points toward Go or Rust.
+
+2. What do you care about more: delivery speed or long-term rigor?
+
+• A Fastest rewrite
+• B Balanced
+    `);
+
+    expect(questionnaire?.questions).toHaveLength(2);
+    expect(questionnaire?.questions[0]).toMatchObject({
+      prompt: "What do you want the final artifact to be?",
+      options: [
+        { key: "A", label: "Single static binary" },
+        { key: "B", label: "Normal runtime-managed CLI" },
+      ],
+    });
+    expect(formatPendingQuestionnairePrompt(questionnaire!)).toContain("Codex plan question 1 of 2");
+  });
+
+  it("renders a compact questionnaire reply once all answers are filled in", () => {
+    const questionnaire = parsePendingQuestionnaire(`
+1. What do you want the final artifact to be?
+• A Single static binary
+• B Normal runtime-managed CLI
+
+2. What do you care about more?
+• A Fastest rewrite
+• B Balanced
+    `)!;
+    questionnaire.answers[0] = {
+      kind: "option",
+      optionKey: "A",
+      optionLabel: "Single static binary",
+    };
+    questionnaire.answers[1] = {
+      kind: "text",
+      text: "Balanced, but only if we keep the migration simple.",
+    };
+    expect(questionnaireIsComplete(questionnaire)).toBe(true);
+    expect(buildPendingQuestionnaireResponse(questionnaire)).toBe(
+      "1A 2: Balanced, but only if we keep the migration simple.",
+    );
   });
 });

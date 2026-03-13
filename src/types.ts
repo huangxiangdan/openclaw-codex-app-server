@@ -60,6 +60,36 @@ export type PendingInputAction =
       label: string;
     };
 
+export type PendingQuestionnaireOption = {
+  key: string;
+  label: string;
+};
+
+export type PendingQuestionnaireAnswer =
+  | {
+      kind: "option";
+      optionKey: string;
+      optionLabel: string;
+    }
+  | {
+      kind: "text";
+      text: string;
+    };
+
+export type PendingQuestionnaireQuestion = {
+  index: number;
+  prompt: string;
+  options: PendingQuestionnaireOption[];
+  guidance: string[];
+};
+
+export type PendingQuestionnaireState = {
+  questions: PendingQuestionnaireQuestion[];
+  currentIndex: number;
+  answers: Array<PendingQuestionnaireAnswer | null>;
+  awaitingFreeform?: boolean;
+};
+
 export type PendingInputState = {
   requestId: string;
   options: string[];
@@ -67,6 +97,7 @@ export type PendingInputState = {
   expiresAt: number;
   promptText?: string;
   method?: string;
+  questionnaire?: PendingQuestionnaireState;
 };
 
 export type ThreadSummary = {
@@ -237,6 +268,17 @@ export type CallbackAction =
       conversation: ConversationRef;
       requestId: string;
       actionIndex: number;
+      createdAt: number;
+      expiresAt: number;
+    }
+  | {
+      token: string;
+      kind: "pending-questionnaire";
+      conversation: ConversationRef;
+      requestId: string;
+      questionIndex: number;
+      action: "select" | "prev" | "next" | "freeform";
+      optionIndex?: number;
       createdAt: number;
       expiresAt: number;
     }

@@ -3,6 +3,9 @@ import type {
   PendingApprovalDecision,
   PendingInputAction,
   PendingInputState,
+  PendingQuestionnaireAnswer,
+  PendingQuestionnaireQuestion,
+  PendingQuestionnaireState,
 } from "./types.js";
 
 const MAX_PENDING_REQUEST_TEXT_CHARS = 1200;
@@ -267,6 +270,144 @@ function truncateWithNotice(text: string, maxChars: number, notice: string): str
   return `${trimmed.slice(0, Math.max(1, maxChars)).trimEnd()}\n\n${notice}`;
 }
 
+function parseQuestionnaireOption(line: string): { key: string; label: string } | null {
+  const match = line.trim().match(/^[•*-]?\s*([A-Z])[\.\)]?\s+(.+)$/);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  return {
+    key: match[1],
+    label: match[2].trim(),
+  };
+}
+
+export function parsePendingQuestionnaire(text: string): PendingQuestionnaireState | undefined {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  const starts = [...normalized.matchAll(/(?:^|\n)(\d+)\.\s+/g)].map((match) => match.index ?? 0);
+  if (starts.length < 2) {
+    return undefined;
+  }
+  const questions: PendingQuestionnaireQuestion[] = [];
+  for (let index = 0; index < starts.length; index += 1) {
+    const start = starts[index] ?? 0;
+    const end = starts[index + 1] ?? normalized.length;
+    const block = normalized
+      .slice(start, end)
+      .trim()
+      .replace(/^\d+\.\s+/, "");
+    const lines = block.split("\n");
+    const prompt = lines.shift()?.trim() ?? "";
+    if (!prompt) {
+      continue;
+    }
+    const options: Array<{ key: string; label: string }> = [];
+    const guidance: string[] = [];
+    let inGuidance = false;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      if (/^guidance:?$/i.test(line)) {
+        inGuidance = true;
+        continue;
+      }
+      const option = parseQuestionnaireOption(line);
+      if (option && !inGuidance) {
+        options.push(option);
+        continue;
+      }
+      if (inGuidance) {
+        guidance.push(line.replace(/^[•*-]\s*/, "").trim());
+      }
+    }
+    if (options.length === 0) {
+      continue;
+    }
+    questions.push({
+      index: questions.length,
+      prompt,
+      options,
+      guidance,
+    });
+  }
+  if (questions.length < 2) {
+    return undefined;
+  }
+  return {
+    questions,
+    currentIndex: 0,
+    answers: questions.map(() => null),
+  };
+}
+
+export function formatPendingQuestionnairePrompt(
+  questionnaire: PendingQuestionnaireState,
+): string {
+  const question = questionnaire.questions[questionnaire.currentIndex];
+  if (!question) {
+    return "Codex needs input.";
+  }
+  const lines = [
+    `Codex plan question ${questionnaire.currentIndex + 1} of ${questionnaire.questions.length}`,
+    "",
+    question.prompt,
+    "",
+    ...question.options.map((option) => `${option.key}. ${option.label}`),
+  ];
+  if (question.guidance.length > 0) {
+    lines.push("", "Guidance:");
+    for (const item of question.guidance) {
+      lines.push(`- ${item}`);
+    }
+  }
+  const currentAnswer = questionnaire.answers[questionnaire.currentIndex];
+  if (currentAnswer) {
+    lines.push(
+      "",
+      `Current answer: ${
+        currentAnswer.kind === "option"
+          ? `${currentAnswer.optionKey}. ${currentAnswer.optionLabel}`
+          : currentAnswer.text
+      }`,
+    );
+  } else if (questionnaire.awaitingFreeform) {
+    lines.push("", "Current answer: waiting for your free-form reply");
+  }
+  return lines.join("\n");
+}
+
+export function renderPendingQuestionnaireAnswer(answer: PendingQuestionnaireAnswer | null): string {
+  if (!answer) {
+    return "";
+  }
+  return answer.kind === "option" ? `${answer.optionKey}` : answer.text.trim();
+}
+
+export function buildPendingQuestionnaireResponse(
+  questionnaire: PendingQuestionnaireState,
+): string {
+  return questionnaire.questions
+    .map((question, index) => {
+      const answer = questionnaire.answers[index];
+      const rendered = renderPendingQuestionnaireAnswer(answer);
+      return rendered ? `${question.index + 1}${answer?.kind === "option" ? rendered : `: ${rendered}`}` : "";
+    })
+    .filter(Boolean)
+    .join(" ");
+}
+
+export function questionnaireIsComplete(questionnaire: PendingQuestionnaireState): boolean {
+  return questionnaire.answers.every(
+    (answer) =>
+      answer != null &&
+      (answer.kind === "option" || (answer.kind === "text" && answer.text.trim().length > 0)),
+  );
+}
+
 function collectText(value: unknown): string[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -389,6 +530,9 @@ export function createPendingInputState(params: {
     options: params.options,
     actions,
     expiresAt: params.expiresAt,
+    questionnaire: parsePendingQuestionnaire(
+      dedupeJoinedText(collectText(params.requestParams)),
+    ),
     promptText: buildPendingPromptText({
       method: params.method,
       requestId: params.requestId,

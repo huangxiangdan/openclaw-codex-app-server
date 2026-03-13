@@ -29,6 +29,16 @@ type PutCallbackInput =
       ttlMs?: number;
     }
   | {
+      kind: "pending-questionnaire";
+      conversation: ConversationTarget;
+      requestId: string;
+      questionIndex: number;
+      action: "select" | "prev" | "next" | "freeform";
+      optionIndex?: number;
+      token?: string;
+      ttlMs?: number;
+    }
+  | {
       kind: "picker-view";
       conversation: ConversationTarget;
       view: Extract<CallbackAction, { kind: "picker-view" }>["view"];
@@ -175,7 +185,7 @@ export class PluginStateStore {
       (entry) => entry.requestId !== requestId,
     );
     this.snapshot.callbacks = this.snapshot.callbacks.filter((entry) => {
-      if (entry.kind !== "pending-input") {
+      if (entry.kind !== "pending-input" && entry.kind !== "pending-questionnaire") {
         return true;
       }
       return entry.requestId !== requestId;
@@ -211,6 +221,18 @@ export class PluginStateStore {
               createdAt: now,
               expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
             }
+          : callback.kind === "pending-questionnaire"
+            ? {
+                kind: "pending-questionnaire",
+                conversation: callback.conversation,
+                requestId: callback.requestId,
+                questionIndex: callback.questionIndex,
+                action: callback.action,
+                optionIndex: callback.optionIndex,
+                token: callback.token ?? this.createCallbackToken(),
+                createdAt: now,
+                expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
+              }
           : callback.kind === "picker-view"
             ? {
               kind: "picker-view",

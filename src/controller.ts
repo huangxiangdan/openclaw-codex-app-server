@@ -35,7 +35,12 @@ import {
   formatThreadState,
   formatTurnCompletion,
 } from "./format.js";
-import { requestToken } from "./pending-input.js";
+import {
+  buildPendingQuestionnaireResponse,
+  formatPendingQuestionnairePrompt,
+  questionnaireIsComplete,
+  requestToken,
+} from "./pending-input.js";
 import {
   buildConversationKey,
   buildPluginSessionKey,
@@ -377,6 +382,18 @@ export class CodexPluginController {
     const activeKey = buildConversationKey(conversation);
     const active = this.activeRuns.get(activeKey);
     if (active) {
+      const pending = this.store.getPendingRequestByConversation(conversation);
+      if (pending?.state.questionnaire && !event.content.trim().startsWith("/")) {
+        const handled = await this.handlePendingQuestionnaireFreeformAnswer(
+          conversation,
+          pending,
+          active.handle,
+          event.content,
+        );
+        if (handled) {
+          return { handled: true };
+        }
+      }
       const handled = await active.handle.queueMessage(event.content);
       return { handled };
     }
@@ -1357,6 +1374,18 @@ export class CodexPluginController {
       }
       return;
     }
+    if (state.questionnaire) {
+      await this.store.upsertPendingRequest({
+        requestId: state.requestId,
+        conversation,
+        threadId: run.getThreadId() ?? this.store.getBinding(conversation)?.threadId ?? "",
+        workspaceDir,
+        state,
+        updatedAt: Date.now(),
+      });
+      await this.sendPendingQuestionnaire(conversation, state);
+      return;
+    }
     const callbacks = await Promise.all(
       (state.actions ?? []).map(async (_action, actionIndex) => {
         return await this.store.putCallback({
@@ -1380,6 +1409,109 @@ export class CodexPluginController {
     await this.sendText(conversation, state.promptText ?? "Codex needs input.", { buttons });
   }
 
+  private async sendPendingQuestionnaire(
+    conversation: ConversationTarget,
+    state: PendingInputState,
+    opts?: {
+      editMessage?: (text: string, buttons: PluginInteractiveButtons) => Promise<void>;
+    },
+  ): Promise<void> {
+    const questionnaire = state.questionnaire;
+    if (!questionnaire) {
+      return;
+    }
+    const buttons = await this.buildPendingQuestionnaireButtons(conversation, state);
+    const text = formatPendingQuestionnairePrompt(questionnaire);
+    if (opts?.editMessage) {
+      await opts.editMessage(text, buttons);
+      return;
+    }
+    await this.sendText(conversation, text, { buttons });
+  }
+
+  private async buildPendingQuestionnaireButtons(
+    conversation: ConversationTarget,
+    state: PendingInputState,
+  ): Promise<PluginInteractiveButtons> {
+    const questionnaire = state.questionnaire;
+    if (!questionnaire) {
+      return [];
+    }
+    const question = questionnaire.questions[questionnaire.currentIndex];
+    if (!question) {
+      return [];
+    }
+    const rows: PluginInteractiveButtons = [];
+    for (let optionIndex = 0; optionIndex < question.options.length; optionIndex += 1) {
+      const option = question.options[optionIndex];
+      if (!option) {
+        continue;
+      }
+      const callback = await this.store.putCallback({
+        kind: "pending-questionnaire",
+        conversation,
+        requestId: state.requestId,
+        questionIndex: question.index,
+        action: "select",
+        optionIndex,
+        ttlMs: Math.max(1_000, state.expiresAt - Date.now()),
+      });
+      rows.push([
+        {
+          text: `${option.key}. ${option.label}`,
+          callback_data: `${INTERACTIVE_NAMESPACE}:${callback.token}`,
+        },
+      ]);
+    }
+    const navRow: PluginInteractiveButtons[number] = [];
+    if (questionnaire.currentIndex > 0) {
+      const prev = await this.store.putCallback({
+        kind: "pending-questionnaire",
+        conversation,
+        requestId: state.requestId,
+        questionIndex: questionnaire.currentIndex,
+        action: "prev",
+        ttlMs: Math.max(1_000, state.expiresAt - Date.now()),
+      });
+      navRow.push({
+        text: "Prev",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${prev.token}`,
+      });
+    }
+    if (questionnaire.currentIndex < questionnaire.questions.length - 1) {
+      const next = await this.store.putCallback({
+        kind: "pending-questionnaire",
+        conversation,
+        requestId: state.requestId,
+        questionIndex: questionnaire.currentIndex,
+        action: "next",
+        ttlMs: Math.max(1_000, state.expiresAt - Date.now()),
+      });
+      navRow.push({
+        text: "Next",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${next.token}`,
+      });
+    }
+    if (navRow.length > 0) {
+      rows.push(navRow);
+    }
+    const freeform = await this.store.putCallback({
+      kind: "pending-questionnaire",
+      conversation,
+      requestId: state.requestId,
+      questionIndex: questionnaire.currentIndex,
+      action: "freeform",
+      ttlMs: Math.max(1_000, state.expiresAt - Date.now()),
+    });
+    rows.push([
+      {
+        text: "Use Free Form",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${freeform.token}`,
+      },
+    ]);
+    return rows;
+  }
+
   private buildPendingButtons(
     state: PendingInputState,
     callbacks: CallbackAction[],
@@ -1398,6 +1530,43 @@ export class CodexPluginController {
       );
     }
     return rows;
+  }
+
+  private async handlePendingQuestionnaireFreeformAnswer(
+    conversation: ConversationTarget,
+    pending: StoredPendingRequest,
+    run: ActiveCodexRun,
+    text: string,
+  ): Promise<boolean> {
+    const questionnaire = pending.state.questionnaire;
+    const answerText = text.trim();
+    if (!questionnaire || !answerText) {
+      return false;
+    }
+    questionnaire.answers[questionnaire.currentIndex] = {
+      kind: "text",
+      text: answerText,
+    };
+    questionnaire.awaitingFreeform = false;
+    pending.updatedAt = Date.now();
+    await this.store.upsertPendingRequest(pending);
+    if (questionnaireIsComplete(questionnaire)) {
+      const submitted = await run.queueMessage(buildPendingQuestionnaireResponse(questionnaire));
+      if (!submitted) {
+        return false;
+      }
+      await this.store.removePendingRequest(pending.requestId);
+      await this.sendText(conversation, "Recorded your answers and sent them to Codex.");
+      return true;
+    }
+    questionnaire.currentIndex = Math.min(
+      questionnaire.questions.length - 1,
+      questionnaire.currentIndex + 1,
+    );
+    pending.updatedAt = Date.now();
+    await this.store.upsertPendingRequest(pending);
+    await this.sendPendingQuestionnaire(conversation, pending.state);
+    return true;
   }
 
   private resolveThreadWorkspaceDir(
@@ -1787,6 +1956,105 @@ export class CodexPluginController {
       }
       await this.store.removeCallback(callback.token);
       await responders.reply("Sent to Codex.");
+      return;
+    }
+    if (callback.kind === "pending-questionnaire") {
+      const pending = this.store.getPendingRequestById(callback.requestId);
+      if (!pending || pending.state.expiresAt <= Date.now() || !pending.state.questionnaire) {
+        await this.store.removeCallback(callback.token);
+        await responders.reply("That Codex questionnaire expired. Please retry.");
+        return;
+      }
+      const active = this.activeRuns.get(buildConversationKey(callback.conversation));
+      if (!active) {
+        await responders.reply("No active Codex run is waiting for input.");
+        return;
+      }
+      const questionnaire = pending.state.questionnaire;
+      if (callback.action === "freeform") {
+        questionnaire.currentIndex = Math.max(
+          0,
+          Math.min(callback.questionIndex, questionnaire.questions.length - 1),
+        );
+        questionnaire.awaitingFreeform = true;
+        pending.updatedAt = Date.now();
+        await this.store.upsertPendingRequest(pending);
+        await responders.reply(
+          `Send a free-form answer for question ${questionnaire.currentIndex + 1} of ${questionnaire.questions.length} and I’ll record it.`,
+        );
+        await this.sendPendingQuestionnaire(callback.conversation, pending.state, {
+          editMessage: async (text, buttons) => {
+            await responders.editPicker({ text, buttons });
+          },
+        });
+        return;
+      }
+      if (callback.action === "prev") {
+        questionnaire.currentIndex = Math.max(0, callback.questionIndex - 1);
+        questionnaire.awaitingFreeform = false;
+        pending.updatedAt = Date.now();
+        await this.store.upsertPendingRequest(pending);
+        await this.sendPendingQuestionnaire(callback.conversation, pending.state, {
+          editMessage: async (text, buttons) => {
+            await responders.editPicker({ text, buttons });
+          },
+        });
+        return;
+      }
+      if (callback.action === "next") {
+        const currentAnswer = questionnaire.answers[callback.questionIndex];
+        if (!currentAnswer) {
+          await responders.reply("Answer this question first, or choose Free Form.");
+          return;
+        }
+        questionnaire.currentIndex = Math.min(
+          questionnaire.questions.length - 1,
+          callback.questionIndex + 1,
+        );
+        questionnaire.awaitingFreeform = false;
+        pending.updatedAt = Date.now();
+        await this.store.upsertPendingRequest(pending);
+        await this.sendPendingQuestionnaire(callback.conversation, pending.state, {
+          editMessage: async (text, buttons) => {
+            await responders.editPicker({ text, buttons });
+          },
+        });
+        return;
+      }
+      const question = questionnaire.questions[callback.questionIndex];
+      const option = question?.options[callback.optionIndex ?? -1];
+      if (!question || !option) {
+        await responders.reply("That Codex option is no longer available.");
+        return;
+      }
+      questionnaire.answers[callback.questionIndex] = {
+        kind: "option",
+        optionKey: option.key,
+        optionLabel: option.label,
+      };
+      questionnaire.awaitingFreeform = false;
+      questionnaire.currentIndex = Math.min(
+        questionnaire.questions.length - 1,
+        callback.questionIndex + 1,
+      );
+      pending.updatedAt = Date.now();
+      await this.store.upsertPendingRequest(pending);
+      if (questionnaireIsComplete(questionnaire)) {
+        const submitted = await active.handle.queueMessage(buildPendingQuestionnaireResponse(questionnaire));
+        if (!submitted) {
+          await responders.reply("That Codex questionnaire is no longer accepting answers.");
+          return;
+        }
+        await responders.clear().catch(() => undefined);
+        await this.store.removePendingRequest(pending.requestId);
+        await responders.reply("Recorded your answers and sent them to Codex.");
+        return;
+      }
+      await this.sendPendingQuestionnaire(callback.conversation, pending.state, {
+        editMessage: async (text, buttons) => {
+          await responders.editPicker({ text, buttons });
+        },
+      });
       return;
     }
     if (callback.kind === "run-prompt") {

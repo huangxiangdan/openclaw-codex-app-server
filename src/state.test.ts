@@ -115,8 +115,21 @@ describe("state store", () => {
       requestId: "req-1",
       actionIndex: 0,
     });
+    const questionnaireCallback = await store.putCallback({
+      kind: "pending-questionnaire",
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "chan-1",
+      },
+      requestId: "req-1",
+      questionIndex: 0,
+      action: "select",
+      optionIndex: 0,
+    });
     await store.removePendingRequest("req-1");
     expect(store.getPendingRequestById("req-1")).toBeNull();
     expect(store.getCallback(callback.token)).toBeNull();
+    expect(store.getCallback(questionnaireCallback.token)).toBeNull();
   });
 });
