@@ -281,6 +281,66 @@ function parseQuestionnaireOption(line: string): { key: string; label: string } 
   };
 }
 
+function extractQuestionnaireFromStructuredRequest(
+  value: unknown,
+): PendingQuestionnaireState | undefined {
+  const record = asRecord(value);
+  const rawQuestions = Array.isArray(record?.questions) ? record.questions : [];
+  if (rawQuestions.length === 0) {
+    return undefined;
+  }
+  const questions: PendingQuestionnaireQuestion[] = rawQuestions
+    .map((entry, index) => {
+      const question = asRecord(entry);
+      if (!question) {
+        return null;
+      }
+      const rawOptions = Array.isArray(question.options) ? question.options : [];
+      const options = rawOptions
+        .map((option, optionIndex) => {
+          const optionRecord = asRecord(option);
+          if (!optionRecord) {
+            return null;
+          }
+          const label = pickString(optionRecord, ["label", "title", "text"]);
+          if (!label) {
+            return null;
+          }
+          return {
+            key: String.fromCharCode(65 + optionIndex),
+            label,
+            description: pickString(optionRecord, ["description", "details", "summary"]),
+            recommended: /\(recommended\)/i.test(label),
+          };
+        })
+        .filter(Boolean) as PendingQuestionnaireQuestion["options"];
+      if (options.length === 0) {
+        return null;
+      }
+      const header = pickString(question, ["header"]);
+      const prompt = pickString(question, ["question"]) ?? header ?? `Question ${index + 1}`;
+      return {
+        index,
+        id: pickString(question, ["id"]) ?? `q${index + 1}`,
+        header,
+        prompt,
+        options,
+        guidance: [],
+        allowFreeform: question.isOther === true || question.is_other === true,
+      };
+    })
+    .filter(Boolean) as PendingQuestionnaireQuestion[];
+  if (questions.length === 0) {
+    return undefined;
+  }
+  return {
+    questions,
+    currentIndex: 0,
+    answers: questions.map(() => null),
+    responseMode: "structured",
+  };
+}
+
 export function parsePendingQuestionnaire(text: string): PendingQuestionnaireState | undefined {
   const normalized = text.replace(/\r\n/g, "\n").trim();
   if (!normalized) {
@@ -329,6 +389,7 @@ export function parsePendingQuestionnaire(text: string): PendingQuestionnaireSta
     }
     questions.push({
       index: questions.length,
+      id: `q${questions.length + 1}`,
       prompt,
       options,
       guidance,
@@ -341,6 +402,7 @@ export function parsePendingQuestionnaire(text: string): PendingQuestionnaireSta
     questions,
     currentIndex: 0,
     answers: questions.map(() => null),
+    responseMode: "compact",
   };
 }
 
@@ -351,18 +413,30 @@ export function formatPendingQuestionnairePrompt(
   if (!question) {
     return "Codex needs input.";
   }
+  const heading =
+    question.header && question.prompt && question.header !== question.prompt
+      ? `${question.header}: ${question.prompt}`
+      : (question.header ?? question.prompt);
   const lines = [
     `Codex plan question ${questionnaire.currentIndex + 1} of ${questionnaire.questions.length}`,
     "",
-    question.prompt,
+    heading,
     "",
-    ...question.options.map((option) => `${option.key}. ${option.label}`),
   ];
+  for (const option of question.options) {
+    lines.push(`${option.key}. ${option.label}`);
+    if (option.description) {
+      lines.push(`   ${option.description}`);
+    }
+  }
   if (question.guidance.length > 0) {
     lines.push("", "Guidance:");
     for (const item of question.guidance) {
       lines.push(`- ${item}`);
     }
+  }
+  if (question.allowFreeform) {
+    lines.push("", "Other: You can reply with free text.");
   }
   const currentAnswer = questionnaire.answers[questionnaire.currentIndex];
   if (currentAnswer) {
@@ -384,20 +458,35 @@ export function renderPendingQuestionnaireAnswer(answer: PendingQuestionnaireAns
   if (!answer) {
     return "";
   }
-  return answer.kind === "option" ? `${answer.optionKey}` : answer.text.trim();
+  return answer.kind === "option" ? answer.optionLabel.trim() : answer.text.trim();
 }
 
 export function buildPendingQuestionnaireResponse(
   questionnaire: PendingQuestionnaireState,
-): string {
-  return questionnaire.questions
-    .map((question, index) => {
-      const answer = questionnaire.answers[index];
-      const rendered = renderPendingQuestionnaireAnswer(answer);
-      return rendered ? `${question.index + 1}${answer?.kind === "option" ? rendered : `: ${rendered}`}` : "";
-    })
-    .filter(Boolean)
-    .join(" ");
+): { answers: Record<string, { answers: string[] }> } | string {
+  if (questionnaire.responseMode === "compact") {
+    return questionnaire.questions
+      .map((question, index) => {
+        const answer = questionnaire.answers[index];
+        if (!answer) {
+          return "";
+        }
+        return answer.kind === "option"
+          ? `${question.index + 1}${answer.optionKey}`
+          : `${question.index + 1}: ${answer.text.trim()}`;
+      })
+      .filter(Boolean)
+      .join(" ");
+  }
+  return {
+    answers: Object.fromEntries(
+      questionnaire.questions.map((question, index) => {
+        const answer = questionnaire.answers[index];
+        const rendered = renderPendingQuestionnaireAnswer(answer);
+        return [question.id, { answers: rendered ? [rendered] : [] }];
+      }),
+    ),
+  };
 }
 
 export function questionnaireIsComplete(questionnaire: PendingQuestionnaireState): boolean {
@@ -525,14 +614,15 @@ export function createPendingInputState(params: {
     requestParams: params.requestParams,
     options: params.options,
   });
+  const questionnaire =
+    extractQuestionnaireFromStructuredRequest(params.requestParams) ??
+    parsePendingQuestionnaire(dedupeJoinedText(collectText(params.requestParams)));
   return {
     requestId: params.requestId,
     options: params.options,
     actions,
     expiresAt: params.expiresAt,
-    questionnaire: parsePendingQuestionnaire(
-      dedupeJoinedText(collectText(params.requestParams)),
-    ),
+    questionnaire,
     promptText: buildPendingPromptText({
       method: params.method,
       requestId: params.requestId,

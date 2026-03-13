@@ -63,6 +63,8 @@ export type PendingInputAction =
 export type PendingQuestionnaireOption = {
   key: string;
   label: string;
+  description?: string;
+  recommended?: boolean;
 };
 
 export type PendingQuestionnaireAnswer =
@@ -78,9 +80,12 @@ export type PendingQuestionnaireAnswer =
 
 export type PendingQuestionnaireQuestion = {
   index: number;
+  id: string;
+  header?: string;
   prompt: string;
   options: PendingQuestionnaireOption[];
   guidance: string[];
+  allowFreeform?: boolean;
 };
 
 export type PendingQuestionnaireState = {
@@ -88,6 +93,7 @@ export type PendingQuestionnaireState = {
   currentIndex: number;
   answers: Array<PendingQuestionnaireAnswer | null>;
   awaitingFreeform?: boolean;
+  responseMode?: "structured" | "compact";
 };
 
 export type PendingInputState = {

@@ -1551,7 +1551,9 @@ export class CodexPluginController {
     pending.updatedAt = Date.now();
     await this.store.upsertPendingRequest(pending);
     if (questionnaireIsComplete(questionnaire)) {
-      const submitted = await run.queueMessage(buildPendingQuestionnaireResponse(questionnaire));
+      const submitted = await run.submitPendingInputPayload(
+        buildPendingQuestionnaireResponse(questionnaire),
+      );
       if (!submitted) {
         return false;
       }
@@ -2040,7 +2042,9 @@ export class CodexPluginController {
       pending.updatedAt = Date.now();
       await this.store.upsertPendingRequest(pending);
       if (questionnaireIsComplete(questionnaire)) {
-        const submitted = await active.handle.queueMessage(buildPendingQuestionnaireResponse(questionnaire));
+        const submitted = await active.handle.submitPendingInputPayload(
+          buildPendingQuestionnaireResponse(questionnaire),
+        );
         if (!submitted) {
           await responders.reply("That Codex questionnaire is no longer accepting answers.");
           return;

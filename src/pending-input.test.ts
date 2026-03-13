@@ -86,6 +86,7 @@ Guidance:
 
     expect(questionnaire?.questions).toHaveLength(2);
     expect(questionnaire?.questions[0]).toMatchObject({
+      id: "q1",
       prompt: "What do you want the final artifact to be?",
       options: [
         { key: "A", label: "Single static binary" },
@@ -118,5 +119,84 @@ Guidance:
     expect(buildPendingQuestionnaireResponse(questionnaire)).toBe(
       "1A 2: Balanced, but only if we keep the migration simple.",
     );
+  });
+
+  it("parses structured request_user_input questions into questionnaire state", () => {
+    const state = createPendingInputState({
+      method: "item/tool/requestUserInput",
+      requestId: "req-3",
+      requestParams: {
+        questions: [
+          {
+            id: "runtime",
+            header: "Runtime",
+            question: "Which runtime shape should we optimize for?",
+            isOther: true,
+            options: [
+              {
+                label: "Long-lived service (Recommended)",
+                description: "Best fit for stateful flows.",
+              },
+              {
+                label: "Mostly serverless",
+                description: "Best fit for stateless handlers.",
+              },
+            ],
+          },
+          {
+            id: "db",
+            header: "DB",
+            question: "What kind of database migration do you want from SQLite?",
+            options: [{ label: "Postgres (Recommended)" }, { label: "Firestore" }],
+          },
+        ],
+      },
+      options: [],
+      expiresAt: Date.now() + 60_000,
+    });
+
+    expect(state.questionnaire?.questions).toHaveLength(2);
+    expect(state.questionnaire?.questions[0]).toMatchObject({
+      id: "runtime",
+      header: "Runtime",
+      prompt: "Which runtime shape should we optimize for?",
+      allowFreeform: true,
+      options: [
+        {
+          key: "A",
+          label: "Long-lived service (Recommended)",
+          description: "Best fit for stateful flows.",
+          recommended: true,
+        },
+        {
+          key: "B",
+          label: "Mostly serverless",
+          description: "Best fit for stateless handlers.",
+          recommended: false,
+        },
+      ],
+    });
+    expect(formatPendingQuestionnairePrompt(state.questionnaire!)).toContain(
+      "Runtime: Which runtime shape should we optimize for?",
+    );
+    expect(formatPendingQuestionnairePrompt(state.questionnaire!)).toContain(
+      "Other: You can reply with free text.",
+    );
+    state.questionnaire!.answers[0] = {
+      kind: "option",
+      optionKey: "A",
+      optionLabel: "Long-lived service (Recommended)",
+    };
+    state.questionnaire!.answers[1] = {
+      kind: "option",
+      optionKey: "A",
+      optionLabel: "Postgres (Recommended)",
+    };
+    expect(buildPendingQuestionnaireResponse(state.questionnaire!)).toEqual({
+      answers: {
+        runtime: { answers: ["Long-lived service (Recommended)"] },
+        db: { answers: ["Postgres (Recommended)"] },
+      },
+    });
   });
 });

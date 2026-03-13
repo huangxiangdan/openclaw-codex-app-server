@@ -61,6 +61,7 @@ export type ActiveCodexRun = {
   result: Promise<TurnResult | ReviewResult>;
   queueMessage: (text: string) => Promise<boolean>;
   submitPendingInput: (actionIndex: number) => Promise<boolean>;
+  submitPendingInputPayload: (payload: unknown) => Promise<boolean>;
   interrupt: () => Promise<void>;
   isAwaitingInput: () => boolean;
   getThreadId: () => string | undefined;
@@ -2314,6 +2315,13 @@ export class CodexAppServerClient {
         });
         return true;
       },
+      submitPendingInputPayload: async (payload) => {
+        if (!pendingInput) {
+          return false;
+        }
+        pendingInput.resolve(payload);
+        return true;
+      },
       interrupt: async () => {
         interrupted = true;
         await params.onInterrupted?.();
@@ -2657,6 +2665,13 @@ export class CodexAppServerClient {
           index: actionIndex,
           option: pendingInput.options[actionIndex] ?? "",
         });
+        return true;
+      },
+      submitPendingInputPayload: async (payload) => {
+        if (!pendingInput) {
+          return false;
+        }
+        pendingInput.resolve(payload);
         return true;
       },
       interrupt: async () => {
