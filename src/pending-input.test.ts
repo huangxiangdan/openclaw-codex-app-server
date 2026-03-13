@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPendingPromptText,
   buildPendingUserInputActions,
   createPendingInputState,
   parseCodexUserInput,
@@ -46,5 +47,20 @@ describe("pending-input helpers", () => {
     });
     expect(state.promptText).toContain("Codex input requested");
     expect(state.promptText).toContain("Choices:");
+  });
+
+  it("truncates oversized pending request prompts for chat delivery", () => {
+    const text = buildPendingPromptText({
+      method: "item/tool/requestUserInput",
+      requestId: "req-2",
+      requestParams: {
+        details: "A".repeat(5000),
+      },
+      options: ["A", "B"],
+      actions: [],
+      expiresAt: Date.now() + 60_000,
+    });
+    expect(text.length).toBeLessThan(2400);
+    expect(text).toContain("[Prompt truncated for chat delivery.");
   });
 });

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -17,8 +18,9 @@ import {
   formatAccountSummary,
   formatBinding,
   formatBoundThreadSummary,
+  formatCodexPlanAttachmentFallback,
+  formatCodexPlanAttachmentSummary,
   formatCodexPlanInlineText,
-  formatCodexPlanSteps,
   formatCodexReviewFindingMessage,
   formatCodexStatusText,
   formatExperimentalFeatures,
@@ -82,6 +84,12 @@ type PickerResponders = {
 type FollowUpSummary = {
   initialReply: ReplyPayload;
   followUps: string[];
+};
+
+type PlanDelivery = {
+  summaryText: string;
+  attachmentPath?: string;
+  attachmentFallbackText?: string;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1145,7 +1153,6 @@ export class CodexPluginController {
           return;
         }
         if (result.planArtifact) {
-          const planText = formatCodexPlanInlineText(result.planArtifact);
           const implement = await this.store.putCallback({
             kind: "run-prompt",
             conversation: params.conversation,
@@ -1157,21 +1164,19 @@ export class CodexPluginController {
             conversation: params.conversation,
             text: "Okay. Staying in plan mode.",
           });
-          const planReply =
-            planText.length <= PLAN_INLINE_TEXT_LIMIT
-              ? planText
-              : [
-                  "Plan ready.",
-                  result.planArtifact.explanation?.trim() ?? "",
-                  formatCodexPlanSteps(result.planArtifact.steps) ?? "",
-                  "",
-                  "Plan preview:",
-                  "",
-                  `${result.planArtifact.markdown.trim().slice(0, 1400).trimEnd()}\n\n[Preview truncated]`,
-                ]
-                  .filter(Boolean)
-                  .join("\n");
-          await this.sendText(params.conversation, planReply);
+          const delivery = await this.buildPlanDelivery(result.planArtifact);
+          await this.sendText(params.conversation, delivery.summaryText);
+          if (delivery.attachmentPath) {
+            const attachmentSent = await this.sendReply(params.conversation, {
+              mediaUrl: delivery.attachmentPath,
+            }).catch((error) => {
+              this.api.logger.warn(`codex plan attachment send failed: ${String(error)}`);
+              return false;
+            });
+            if (!attachmentSent && delivery.attachmentFallbackText) {
+              await this.sendText(params.conversation, delivery.attachmentFallbackText);
+            }
+          }
           await this.sendText(params.conversation, "Implement this plan?", {
             buttons: [
               [
@@ -2103,6 +2108,148 @@ export class CodexPluginController {
     return lines.join("\n");
   }
 
+  private async buildPlanDelivery(
+    plan: NonNullable<import("./types.js").TurnResult["planArtifact"]>,
+  ): Promise<PlanDelivery> {
+    const inlineText = formatCodexPlanInlineText(plan);
+    if (inlineText.length <= PLAN_INLINE_TEXT_LIMIT) {
+      return {
+        summaryText: inlineText,
+      };
+    }
+    const tempDir = path.join(this.api.runtime.state.resolveStateDir(), "tmp");
+    await fs.mkdir(tempDir, { recursive: true, mode: 0o700 });
+    const attachmentPath = path.join(
+      tempDir,
+      `codex-plan-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.md`,
+    );
+    await fs.writeFile(attachmentPath, `${plan.markdown.trim()}\n`, "utf8");
+    return {
+      summaryText: formatCodexPlanAttachmentSummary(plan),
+      attachmentPath,
+      attachmentFallbackText: formatCodexPlanAttachmentFallback(plan),
+    };
+  }
+
+  private async sendReply(
+    conversation: ConversationTarget,
+    payload: {
+      text?: string;
+      buttons?: PluginInteractiveButtons;
+      mediaUrl?: string;
+    },
+  ): Promise<boolean> {
+    const text = payload.text?.trim() ?? "";
+    const hasMedia = typeof payload.mediaUrl === "string" && payload.mediaUrl.trim().length > 0;
+    if (!text && !hasMedia) {
+      return false;
+    }
+    if (isTelegramChannel(conversation.channel)) {
+      const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
+        undefined,
+        "telegram",
+        conversation.accountId,
+        { fallbackLimit: 4000 },
+      );
+      const chunks = text
+        ? this.api.runtime.channel.text.chunkText(text, limit).filter(Boolean)
+        : [];
+      if (hasMedia) {
+        await this.api.runtime.channel.telegram.sendMessageTelegram(
+          conversation.parentConversationId ?? conversation.conversationId,
+          chunks[0] ?? text,
+          {
+            accountId: conversation.accountId,
+            messageThreadId: conversation.threadId,
+            mediaUrl: payload.mediaUrl,
+            buttons: chunks.length <= 1 ? payload.buttons : undefined,
+          },
+        );
+        for (let index = 1; index < chunks.length; index += 1) {
+          const chunk = chunks[index];
+          if (!chunk) {
+            continue;
+          }
+          await this.api.runtime.channel.telegram.sendMessageTelegram(
+            conversation.parentConversationId ?? conversation.conversationId,
+            chunk,
+            {
+              accountId: conversation.accountId,
+              messageThreadId: conversation.threadId,
+              buttons: index === chunks.length - 1 ? payload.buttons : undefined,
+            },
+          );
+        }
+        return true;
+      }
+      const textChunks = chunks.length > 0 ? chunks : [text];
+      for (let index = 0; index < textChunks.length; index += 1) {
+        const chunk = textChunks[index];
+        if (!chunk) {
+          continue;
+        }
+        await this.api.runtime.channel.telegram.sendMessageTelegram(
+          conversation.parentConversationId ?? conversation.conversationId,
+          chunk,
+          {
+            accountId: conversation.accountId,
+            messageThreadId: conversation.threadId,
+            buttons: index === textChunks.length - 1 ? payload.buttons : undefined,
+          },
+        );
+      }
+      return true;
+    }
+    if (isDiscordChannel(conversation.channel)) {
+      const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
+        undefined,
+        "discord",
+        conversation.accountId,
+        { fallbackLimit: 2000 },
+      );
+      const chunks = text
+        ? this.api.runtime.channel.text.chunkText(text, limit).filter(Boolean)
+        : [];
+      if (payload.buttons && payload.buttons.length > 0) {
+        const finalChunk = chunks.pop() ?? text;
+        for (const chunk of chunks) {
+          await this.api.runtime.channel.discord.sendMessageDiscord(conversation.conversationId, chunk, {
+            accountId: conversation.accountId,
+          });
+        }
+        await this.api.runtime.channel.discord.sendComponentMessage(
+          conversation.conversationId,
+          {
+            text: finalChunk,
+            blocks: payload.buttons.map((row) => ({
+              type: "actions" as const,
+              buttons: row.map((button) => ({
+                label: truncateDiscordLabel(button.text),
+                style: "primary" as const,
+                callbackData: button.callback_data,
+              })),
+            })),
+          },
+          {
+            accountId: conversation.accountId,
+          },
+        );
+        return true;
+      }
+      const textChunks = chunks.length > 0 ? chunks : [text];
+      for (const chunk of textChunks) {
+        if (!chunk) {
+          continue;
+        }
+        await this.api.runtime.channel.discord.sendMessageDiscord(conversation.conversationId, chunk, {
+          accountId: conversation.accountId,
+        });
+      }
+      return true;
+    }
+    return false;
+  }
+
   private async resolveProjectFolder(worktreeFolder?: string): Promise<string | undefined> {
     const cwd = worktreeFolder?.trim();
     if (!cwd) {
@@ -2196,50 +2343,10 @@ export class CodexPluginController {
     text: string,
     opts?: { buttons?: PluginInteractiveButtons },
   ): Promise<void> {
-    if (!text.trim()) {
-      return;
-    }
-    if (isTelegramChannel(conversation.channel)) {
-      await this.api.runtime.channel.telegram.sendMessageTelegram(
-        conversation.parentConversationId ?? conversation.conversationId,
-        text,
-        {
-          accountId: conversation.accountId,
-          messageThreadId: conversation.threadId,
-          buttons: opts?.buttons,
-        },
-      );
-      return;
-    }
-    if (isDiscordChannel(conversation.channel)) {
-      if (opts?.buttons && opts.buttons.length > 0) {
-        await this.api.runtime.channel.discord.sendComponentMessage(
-          conversation.conversationId,
-          {
-            text,
-            blocks: opts.buttons.map((row) => ({
-              type: "actions" as const,
-              buttons: row.map((button) => ({
-                label: truncateDiscordLabel(button.text),
-                style: "primary" as const,
-                callbackData: button.callback_data,
-              })),
-            })),
-          },
-          {
-            accountId: conversation.accountId,
-          },
-        );
-        return;
-      }
-      await this.api.runtime.channel.discord.sendMessageDiscord(
-        conversation.conversationId,
-        text,
-        {
-          accountId: conversation.accountId,
-        },
-      );
-    }
+    await this.sendReply(conversation, {
+      text,
+      buttons: opts?.buttons,
+    });
   }
 
   private async renameConversationIfSupported(

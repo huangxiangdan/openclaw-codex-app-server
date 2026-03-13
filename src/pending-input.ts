@@ -5,6 +5,9 @@ import type {
   PendingInputState,
 } from "./types.js";
 
+const MAX_PENDING_REQUEST_TEXT_CHARS = 1200;
+const MAX_PENDING_PROMPT_TEXT_CHARS = 2200;
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -256,6 +259,14 @@ function dedupeJoinedText(chunks: string[]): string {
   return out.join("\n\n").trim();
 }
 
+function truncateWithNotice(text: string, maxChars: number, notice: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, Math.max(1, maxChars)).trimEnd()}\n\n${notice}`;
+}
+
 function collectText(value: unknown): string[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -314,7 +325,13 @@ export function buildPendingPromptText(params: {
   ];
   const requestText = dedupeJoinedText(collectText(params.requestParams));
   if (requestText) {
-    lines.push(requestText);
+    lines.push(
+      truncateWithNotice(
+        requestText,
+        MAX_PENDING_REQUEST_TEXT_CHARS,
+        "[Request details truncated. Use steer text if you want to redirect Codex.]",
+      ),
+    );
   }
   const command =
     findFirstStringByKeys(params.requestParams, [
@@ -348,7 +365,11 @@ export function buildPendingPromptText(params: {
   }
   const seconds = Math.max(1, Math.round((params.expiresAt - Date.now()) / 1_000));
   lines.push(`Expires in: ${seconds}s`);
-  return lines.join("\n");
+  return truncateWithNotice(
+    lines.join("\n"),
+    MAX_PENDING_PROMPT_TEXT_CHARS,
+    "[Prompt truncated for chat delivery. Use the buttons or reply with steer text.]",
+  );
 }
 
 export function createPendingInputState(params: {

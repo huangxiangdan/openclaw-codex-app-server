@@ -135,6 +135,15 @@ declare module "openclaw/plugin-sdk" {
           }) => Promise<unknown>;
           resolveByConversation: (ref: ConversationRef) => SessionBindingRecord | null;
         };
+        text: {
+          chunkText: (text: string, limit: number) => string[];
+          resolveTextChunkLimit: (
+            cfg: unknown,
+            provider?: string,
+            accountId?: string | null,
+            opts?: { fallbackLimit?: number },
+          ) => number;
+        };
         telegram: {
           sendMessageTelegram: (
             to: string,
@@ -142,6 +151,10 @@ declare module "openclaw/plugin-sdk" {
             opts?: {
               accountId?: string;
               messageThreadId?: number;
+              mediaUrl?: string;
+              mediaLocalRoots?: readonly string[];
+              plainText?: string;
+              textMode?: "markdown" | "html";
               buttons?: PluginInteractiveButtons;
             },
           ) => Promise<unknown>;

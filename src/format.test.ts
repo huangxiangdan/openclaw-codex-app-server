@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildCodexPlanMarkdownPreview,
   formatBoundThreadSummary,
+  formatCodexPlanAttachmentFallback,
+  formatCodexPlanAttachmentSummary,
   formatCodexPlanInlineText,
   formatCodexPlanSteps,
   formatCodexReviewFindingMessage,
@@ -305,6 +308,28 @@ describe("formatCodexStatusText", () => {
     expect(text).toContain("5h limit: 89% left (resets 12:28 PM)");
     expect(text).toContain("Weekly limit: 80% left (resets Mar 11)");
     expect(text).not.toContain("Jan 21");
+  });
+});
+
+describe("Codex plan delivery formatting", () => {
+  it("builds a truncated markdown preview for large plans", () => {
+    const preview = buildCodexPlanMarkdownPreview(`# Plan\n\n${"Long section.\n".repeat(300)}`, 120);
+    expect(preview).toContain("[Preview truncated. Open the attachment for the full plan.]");
+    expect(preview?.length).toBeGreaterThan(120);
+  });
+
+  it("formats the attachment summary and fallback texts", () => {
+    const plan = {
+      explanation: "This needs the full rollout guide attached.",
+      steps: [{ step: "Write the rollout", status: "inProgress" as const }],
+      markdown: `# Plan\n\n${"Long section.\n".repeat(10)}`,
+    };
+    expect(formatCodexPlanAttachmentSummary(plan)).toContain("The full plan is attached as Markdown.");
+    expect(formatCodexPlanAttachmentSummary(plan)).toContain("Plan preview:");
+    expect(formatCodexPlanAttachmentFallback(plan)).toContain(
+      "I couldn't attach the full Markdown plan here, so here's a condensed inline summary instead.",
+    );
+    expect(formatCodexPlanAttachmentFallback(plan)).toContain("# Plan");
   });
 });
 

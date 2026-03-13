@@ -806,3 +806,61 @@ export function formatCodexPlanInlineText(plan: NonNullable<TurnResult["planArti
   }
   return lines.join("\n").trim();
 }
+
+export function buildCodexPlanMarkdownPreview(
+  markdown: string,
+  maxChars = 1400,
+): string | undefined {
+  const trimmed = markdown.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxChars).trimEnd()}\n\n[Preview truncated. Open the attachment for the full plan.]`;
+}
+
+export function formatCodexPlanAttachmentSummary(
+  plan: NonNullable<TurnResult["planArtifact"]>,
+): string {
+  const lines = ["Plan ready."];
+  if (plan.explanation?.trim()) {
+    lines.push("", plan.explanation.trim());
+  }
+  const stepsText = formatCodexPlanSteps(plan.steps);
+  if (stepsText) {
+    lines.push("", stepsText);
+  }
+  const summaryPreview = buildCodexPlanMarkdownPreview(plan.markdown, 1400);
+  if (summaryPreview) {
+    lines.push("", "Plan preview:", "", summaryPreview);
+  }
+  lines.push("", "The full plan is attached as Markdown.");
+  return lines.join("\n").trim();
+}
+
+export function formatCodexPlanAttachmentFallback(
+  plan: NonNullable<TurnResult["planArtifact"]>,
+): string {
+  const lines = [
+    "I couldn't attach the full Markdown plan here, so here's a condensed inline summary instead.",
+  ];
+  if (plan.explanation?.trim()) {
+    lines.push("", plan.explanation.trim());
+  }
+  const stepsText = formatCodexPlanSteps(plan.steps);
+  if (stepsText) {
+    lines.push("", stepsText);
+  }
+  const markdownPreview = plan.markdown.trim();
+  if (markdownPreview) {
+    const maxPreviewChars = 1800;
+    const preview =
+      markdownPreview.length > maxPreviewChars
+        ? `${markdownPreview.slice(0, maxPreviewChars).trimEnd()}\n\n[Truncated]`
+        : markdownPreview;
+    lines.push("", preview);
+  }
+  return lines.join("\n").trim();
+}
