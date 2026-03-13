@@ -2,25 +2,36 @@ import { describe, expect, it } from "vitest";
 import {
   formatBoundThreadSummary,
   formatCodexStatusText,
+  formatThreadPickerIntro,
   formatThreadButtonLabel,
 } from "./format.js";
 
 describe("formatThreadButtonLabel", () => {
-  it("uses the project name instead of a worktree path prefix", () => {
+  it("uses worktree and age badges while keeping the project suffix at the end", () => {
     expect(
       formatThreadButtonLabel({
-        threadId: "019cdaf5-54be-7ba2-b610-dd71b0efb42b",
-        title: "App Server Redux - Plugin Surface Build",
-        projectKey: "/Users/huntharo/.codex/worktrees/cb00/openclaw",
+        thread: {
+          threadId: "019cdaf5-54be-7ba2-b610-dd71b0efb42b",
+          title: "App Server Redux - Plugin Surface Build",
+          projectKey: "/Users/huntharo/.codex/worktrees/cb00/openclaw",
+          updatedAt: Date.now() - 4 * 60_000,
+          createdAt: Date.now() - 10 * 60 * 60_000,
+        },
+        includeProjectSuffix: true,
+        isWorktree: true,
+        hasChanges: true,
       }),
-    ).toBe("App Server Redux - Plugin Surface Build (openclaw)");
+    ).toContain("🌿 ✏️ App Server Redux - Plugin Surface Build (openclaw) U:4m C:10h");
   });
 
   it("falls back to the final workspace segment for non-worktree paths", () => {
     expect(
       formatThreadButtonLabel({
-        threadId: "019cbef1-376b-7312-98aa-24488c7499d4",
-        projectKey: "/Users/huntharo/.openclaw/workspace",
+        thread: {
+          threadId: "019cbef1-376b-7312-98aa-24488c7499d4",
+          projectKey: "/Users/huntharo/.openclaw/workspace",
+        },
+        includeProjectSuffix: true,
       }),
     ).toBe("019cbef1-376b-7312-98aa-24488c7499d4 (workspace)");
   });
@@ -112,5 +123,18 @@ describe("formatCodexStatusText", () => {
     expect(text).toContain("Rate limits timezone:");
     expect(text).toContain("5h limit: 85% left");
     expect(text).toContain("Weekly limit: 85% left");
+  });
+});
+
+describe("formatThreadPickerIntro", () => {
+  it("includes a legend for resume badges", () => {
+    const text = formatThreadPickerIntro({
+      page: 0,
+      totalPages: 7,
+      totalItems: 56,
+      includeAll: true,
+    });
+
+    expect(text).toContain("Legend: 🌿 worktree, ✏️ uncommitted changes, U updated, C created.");
   });
 });

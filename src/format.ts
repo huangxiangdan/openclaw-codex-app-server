@@ -53,6 +53,26 @@ function formatThreadButtonTitle(thread: ThreadSummary): string {
   return thread.title?.trim() || thread.threadId;
 }
 
+function formatCompactAge(value?: number): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const deltaMs = Math.max(0, Date.now() - value);
+  const minutes = Math.round(deltaMs / 60_000);
+  if (minutes < 1) {
+    return "0m";
+  }
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return `${hours}h`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days}d`;
+}
+
 function isLikelyWorktreePath(value?: string): boolean {
   const trimmed = value?.trim();
   return Boolean(trimmed && /[/\\]worktrees[/\\][^/\\]+[/\\][^/\\]+/.test(trimmed));
@@ -91,13 +111,36 @@ export function formatThreadPicker(threads: ThreadSummary[]): string {
   ].join("\n");
 }
 
-export function formatThreadButtonLabel(thread: ThreadSummary): string {
-  const projectBadge = getProjectName(thread.projectKey);
-  const suffix = projectBadge ? ` (${projectBadge})` : "";
-  const maxLength = 72;
-  const availableTitleLength = Math.max(16, maxLength - suffix.length);
-  const title = truncateMiddle(formatThreadButtonTitle(thread), availableTitleLength);
-  return `${title}${suffix}`;
+export function formatThreadButtonLabel(params: {
+  thread: ThreadSummary;
+  includeProjectSuffix: boolean;
+  isWorktree?: boolean;
+  hasChanges?: boolean;
+  maxLength?: number;
+}): string {
+  const title = formatThreadButtonTitle(params.thread);
+  const projectBadge = params.includeProjectSuffix ? getProjectName(params.thread.projectKey) : undefined;
+  const projectSuffix = projectBadge ? ` (${projectBadge})` : "";
+  const ageSuffix = [
+    formatCompactAge(params.thread.updatedAt) ? `U:${formatCompactAge(params.thread.updatedAt)}` : undefined,
+    formatCompactAge(params.thread.createdAt) ? `C:${formatCompactAge(params.thread.createdAt)}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const iconPrefix = [
+    params.isWorktree ? "🌿" : undefined,
+    params.hasChanges ? "✏️" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const maxLength = params.maxLength ?? 72;
+  const reservedLength =
+    (iconPrefix ? `${iconPrefix} `.length : 0) +
+    projectSuffix.length +
+    (ageSuffix ? ` ${ageSuffix}`.length : 0);
+  const titleBudget = Math.max(12, maxLength - reservedLength);
+  const clippedTitle = truncateMiddle(title, titleBudget);
+  return [iconPrefix, `${clippedTitle}${projectSuffix}`, ageSuffix].filter(Boolean).join(" ");
 }
 
 export function formatThreadPickerIntro(params: {
@@ -118,6 +161,7 @@ export function formatThreadPickerIntro(params: {
         : "Showing recent Codex sessions.";
   return [
     `${scopeLabel} ${pageLabel}.`,
+    "Legend: 🌿 worktree, ✏️ uncommitted changes, U updated, C created.",
     `Tap a session to resume it. Use Projects to browse by project or \`--cwd /path/to/project\` to narrow to one workspace.`,
     params.totalItems === 0 ? "No matching Codex threads found." : "",
   ]

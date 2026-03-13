@@ -189,6 +189,7 @@ export class CodexPluginController {
   private readonly settings;
   private readonly client;
   private readonly activeRuns = new Map<string, ActiveRunRecord>();
+  private readonly threadChangesCache = new Map<string, Promise<boolean | undefined>>();
   private readonly store;
   private serviceWorkspaceDir?: string;
   private started = false;
@@ -964,6 +965,8 @@ export class CodexPluginController {
     }
     const rows: PluginInteractiveButtons = [];
     for (const thread of params.threads) {
+      const isWorktree = this.isWorktreePath(thread.projectKey);
+      const hasChanges = await this.readThreadHasChanges(thread.projectKey);
       const callback = await this.store.putCallback({
         kind: "resume-thread",
         conversation: params.conversation,
@@ -973,8 +976,10 @@ export class CodexPluginController {
       rows.push([
         {
           text: formatThreadButtonLabel({
-            ...thread,
-            projectKey: params.showProjectName ? thread.projectKey : undefined,
+            thread,
+            includeProjectSuffix: params.showProjectName,
+            isWorktree,
+            hasChanges,
           }),
           callback_data: `${INTERACTIVE_NAMESPACE}:${callback.token}`,
         },
@@ -1361,6 +1366,28 @@ export class CodexPluginController {
       return trimmed;
     }
     return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+  }
+
+  private isWorktreePath(projectKey?: string): boolean {
+    const trimmed = projectKey?.trim();
+    return Boolean(trimmed && /[/\\]worktrees[/\\][^/\\]+[/\\][^/\\]+/.test(trimmed));
+  }
+
+  private readThreadHasChanges(projectKey?: string): Promise<boolean | undefined> {
+    const cwd = projectKey?.trim();
+    if (!cwd) {
+      return Promise.resolve(undefined);
+    }
+    let cached = this.threadChangesCache.get(cwd);
+    if (!cached) {
+      cached = execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
+        timeout: 5_000,
+      })
+        .then((result) => result.stdout.trim().length > 0)
+        .catch(() => undefined);
+      this.threadChangesCache.set(cwd, cached);
+    }
+    return cached;
   }
 
   private async buildBoundConversationMessages(
