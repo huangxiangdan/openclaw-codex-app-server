@@ -1,5 +1,7 @@
+import os from "node:os";
 import type {
   AccountSummary,
+  ContextUsageSnapshot,
   ExperimentalFeatureSummary,
   McpServerSummary,
   ModelSummary,
@@ -155,6 +157,307 @@ export function formatThreadState(state: ThreadState, binding: StoredBinding | n
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function shortenHomePath(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const home = os.homedir().trim();
+  if (!home) {
+    return trimmed;
+  }
+  if (trimmed === home) {
+    return "~";
+  }
+  if (trimmed.startsWith(`${home}/`)) {
+    return `~/${trimmed.slice(home.length + 1)}`;
+  }
+  return trimmed;
+}
+
+export function formatCodexPermissions(params: {
+  approvalPolicy?: string;
+  sandbox?: string;
+}): string | undefined {
+  const approval = params.approvalPolicy?.trim();
+  const sandbox = params.sandbox?.trim();
+  if (!approval && !sandbox) {
+    return undefined;
+  }
+  if (approval === "on-request" && sandbox === "workspace-write") {
+    return "Default";
+  }
+  if (approval === "never" && sandbox === "danger-full-access") {
+    return "Full Access";
+  }
+  if (approval && sandbox) {
+    return `Custom (${sandbox}, ${approval})`;
+  }
+  return approval ?? sandbox;
+}
+
+export function formatCodexAccountText(account: AccountSummary | null | undefined): string {
+  if (!account) {
+    return "unknown";
+  }
+  if (account.type === "chatgpt" && account.email?.trim()) {
+    return account.planType?.trim()
+      ? `${account.email.trim()} (${account.planType.trim()})`
+      : account.email.trim();
+  }
+  if (account.type === "apiKey") {
+    return "API key";
+  }
+  if (account.requiresOpenaiAuth === false) {
+    return "not required";
+  }
+  if (account.requiresOpenaiAuth === true) {
+    return "not signed in";
+  }
+  return "unknown";
+}
+
+export function formatCodexModelText(threadState: ThreadState | undefined): string {
+  const model = threadState?.model?.trim();
+  const provider = threadState?.modelProvider?.trim();
+  const reasoning = threadState?.reasoningEffort?.trim();
+  const parts = [
+    provider && model && !model.startsWith(`${provider}/`) ? `${provider}/${model}` : model,
+  ].filter(Boolean) as string[];
+  if (reasoning) {
+    parts.push(`reasoning ${reasoning}`);
+  }
+  return parts.join(" · ") || "unknown";
+}
+
+function formatCodexFastModeValue(value: string | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "fast" ? "on" : "off";
+}
+
+function advanceCodexResetAtToNextWindow(params: {
+  resetAt: number | undefined;
+  windowSeconds?: number;
+  nowMs: number;
+}): number | undefined {
+  const resetAt = params.resetAt;
+  if (!resetAt || !Number.isFinite(resetAt)) {
+    return undefined;
+  }
+  if (
+    !params.windowSeconds ||
+    !Number.isFinite(params.windowSeconds) ||
+    params.windowSeconds <= 0
+  ) {
+    return resetAt;
+  }
+  const windowMs = Math.round(params.windowSeconds * 1_000);
+  if (windowMs <= 0 || resetAt >= params.nowMs) {
+    return resetAt;
+  }
+  const missedWindows = Math.floor((params.nowMs - resetAt) / windowMs) + 1;
+  return resetAt + missedWindows * windowMs;
+}
+
+export function getCodexStatusTimeZoneLabel(): string | undefined {
+  const timeZone = new Intl.DateTimeFormat().resolvedOptions().timeZone?.trim();
+  return timeZone || undefined;
+}
+
+function formatCodexRateLimitReset(params: {
+  resetAt: number | undefined;
+  windowSeconds?: number;
+  nowMs?: number;
+}): string | undefined {
+  const nowMs = params.nowMs ?? Date.now();
+  const normalizedResetAt = advanceCodexResetAtToNextWindow({
+    resetAt: params.resetAt,
+    windowSeconds: params.windowSeconds,
+    nowMs,
+  });
+  if (!normalizedResetAt || !Number.isFinite(normalizedResetAt)) {
+    return undefined;
+  }
+  const now = new Date(nowMs);
+  const date = new Date(normalizedResetAt);
+  if (Number.isNaN(date.getTime())) {
+    return undefined;
+  }
+  const sameDay = now.toDateString() === date.toDateString();
+  if (sameDay) {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+export function formatCodexRateLimitLine(
+  limit: RateLimitSummary,
+  nowMs = Date.now(),
+): string {
+  const prefix = `${limit.name}: `;
+  const resetText = formatCodexRateLimitReset({
+    resetAt: limit.resetAt,
+    windowSeconds: limit.windowSeconds,
+    nowMs,
+  });
+  if (typeof limit.usedPercent === "number") {
+    const remaining = Math.max(0, Math.round(100 - limit.usedPercent));
+    return `${prefix}${remaining}% left${resetText ? ` (resets ${resetText})` : ""}`;
+  }
+  if (typeof limit.remaining === "number" && typeof limit.limit === "number") {
+    return `${prefix}${limit.remaining}/${limit.limit} remaining${resetText ? ` (resets ${resetText})` : ""}`;
+  }
+  return `${prefix}unavailable`;
+}
+
+function splitCodexRateLimitName(name: string): {
+  prefix: string;
+  label: string;
+  labelOrder: number;
+} {
+  const trimmed = name.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.endsWith("5h limit")) {
+    const prefix = trimmed.slice(0, Math.max(0, trimmed.length - "5h limit".length)).trim();
+    return { prefix, label: "5h limit", labelOrder: 0 };
+  }
+  if (lower.endsWith("weekly limit")) {
+    const prefix = trimmed.slice(0, Math.max(0, trimmed.length - "weekly limit".length)).trim();
+    return { prefix, label: "Weekly limit", labelOrder: 1 };
+  }
+  return { prefix: "", label: trimmed, labelOrder: 99 };
+}
+
+function normalizeCodexModelKey(value: string | undefined): string {
+  const trimmed = value?.trim().toLowerCase() ?? "";
+  const withoutProvider = trimmed.includes("/") ? (trimmed.split("/").at(-1) ?? trimmed) : trimmed;
+  return withoutProvider.replace(/[^a-z0-9]+/g, "");
+}
+
+export function selectVisibleCodexRateLimits(params: {
+  rateLimits: RateLimitSummary[];
+  currentModel?: string;
+}): RateLimitSummary[] {
+  const currentModelKey = normalizeCodexModelKey(params.currentModel);
+  return [...params.rateLimits]
+    .filter((limit) => {
+      const { prefix } = splitCodexRateLimitName(limit.name);
+      if (!prefix) {
+        return true;
+      }
+      if (!currentModelKey) {
+        return false;
+      }
+      return normalizeCodexModelKey(prefix) === currentModelKey;
+    })
+    .toSorted((left, right) => {
+      const leftName = splitCodexRateLimitName(left.name);
+      const rightName = splitCodexRateLimitName(right.name);
+      const leftPrefixBlank = leftName.prefix ? 1 : 0;
+      const rightPrefixBlank = rightName.prefix ? 1 : 0;
+      if (leftPrefixBlank !== rightPrefixBlank) {
+        return leftPrefixBlank - rightPrefixBlank;
+      }
+      const prefixCompare = leftName.prefix.localeCompare(rightName.prefix);
+      if (prefixCompare !== 0) {
+        return prefixCompare;
+      }
+      if (leftName.labelOrder !== rightName.labelOrder) {
+        return leftName.labelOrder - rightName.labelOrder;
+      }
+      return left.name.localeCompare(right.name);
+    });
+}
+
+export function formatCodexContextUsageSnapshot(
+  usage?: ContextUsageSnapshot,
+): string | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const totalTokens = usage.totalTokens;
+  const contextWindow = usage.contextWindow;
+  if (typeof totalTokens !== "number") {
+    return undefined;
+  }
+  const totalLabel = `${Math.round(totalTokens / 1000)}k`;
+  const contextLabel = typeof contextWindow === "number" ? `${Math.round(contextWindow / 1000)}k` : "?";
+  const percentFull =
+    typeof totalTokens === "number" && typeof contextWindow === "number" && contextWindow > 0
+      ? Math.max(0, Math.min(100, Math.round((totalTokens / contextWindow) * 100)))
+      : undefined;
+  const extras: string[] = [];
+  if (typeof percentFull === "number") {
+    extras.push(`${percentFull}% full`);
+  }
+  return `${totalLabel} / ${contextLabel} tokens used${
+    extras.length > 0 ? ` (${extras.join(", ")})` : ""
+  }`;
+}
+
+export function formatCodexStatusText(params: {
+  threadState?: ThreadState;
+  account?: AccountSummary | null;
+  rateLimits: RateLimitSummary[];
+  projectFolder?: string;
+  worktreeFolder?: string;
+  bindingActive?: boolean;
+  contextUsage?: ContextUsageSnapshot;
+}): string {
+  const lines = ["OpenAI Codex"];
+  lines.push(`Binding: ${params.bindingActive ? "active" : "none"}`);
+  if (params.threadState?.threadName?.trim()) {
+    lines.push(`Thread: ${params.threadState.threadName.trim()}`);
+  }
+  if (params.threadState) {
+    lines.push(`Model: ${formatCodexModelText(params.threadState)}`);
+  }
+  lines.push(`Project folder: ${shortenHomePath(params.projectFolder) ?? "unknown"}`);
+  lines.push(`Worktree folder: ${shortenHomePath(params.worktreeFolder) ?? "unknown"}`);
+  if (params.threadState || params.bindingActive) {
+    lines.push(`Fast mode: ${formatCodexFastModeValue(params.threadState?.serviceTier)}`);
+  }
+  const contextUsageText = formatCodexContextUsageSnapshot(params.contextUsage);
+  if (contextUsageText) {
+    lines.push(`Context usage: ${contextUsageText}`);
+  } else if (params.bindingActive) {
+    lines.push("Context usage: unavailable until Codex emits a token-usage update");
+  }
+  const permissions = formatCodexPermissions({
+    approvalPolicy: params.threadState?.approvalPolicy,
+    sandbox: params.threadState?.sandbox,
+  });
+  if (permissions) {
+    lines.push(`Permissions: ${permissions}`);
+  }
+  lines.push(`Account: ${formatCodexAccountText(params.account)}`);
+  const sessionId = params.threadState?.threadId?.trim();
+  if (sessionId) {
+    lines.push(`Session: ${sessionId}`);
+  }
+  const visibleRateLimits = selectVisibleCodexRateLimits({
+    rateLimits: params.rateLimits,
+    currentModel: params.threadState?.model,
+  });
+  if (visibleRateLimits.length > 0) {
+    const timeZoneLabel = getCodexStatusTimeZoneLabel();
+    lines.push("");
+    if (timeZoneLabel) {
+      lines.push(`Rate limits timezone: ${timeZoneLabel}`);
+    }
+    for (const limit of visibleRateLimits) {
+      lines.push(formatCodexRateLimitLine(limit));
+    }
+  }
+  return lines.join("\n");
 }
 
 export function formatBoundThreadSummary(params: {

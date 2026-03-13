@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import path from "node:path";
+import { promisify } from "node:util";
 import type {
   OpenClawPluginApi,
   OpenClawPluginService,
@@ -14,6 +17,7 @@ import {
   formatAccountSummary,
   formatBinding,
   formatBoundThreadSummary,
+  formatCodexStatusText,
   formatExperimentalFeatures,
   formatMcpServers,
   formatModels,
@@ -57,7 +61,7 @@ type ActiveRunRecord = {
   handle: ActiveCodexRun;
 };
 
-const NO_REPLY = "NO_REPLY";
+const execFileAsync = promisify(execFile);
 
 type PickerRender = {
   text: string;
@@ -495,15 +499,13 @@ export class CodexPluginController {
       threadTitle: selection.thread.title,
     });
     await this.sendBoundConversationSummary(conversation);
-    return { text: NO_REPLY };
+    return { text: "" };
   }
 
   private async handleStatusCommand(binding: StoredBinding | null): Promise<ReplyPayload> {
-    if (!binding) {
-      return { text: "No Codex binding for this conversation." };
-    }
-    await this.sendBoundConversationSummary(binding.conversation);
-    return { text: NO_REPLY };
+    return {
+      text: await this.buildStatusText(binding),
+    };
   }
 
   private async handleStopCommand(conversation: ConversationTarget | null): Promise<ReplyPayload> {
@@ -1435,6 +1437,59 @@ export class CodexPluginController {
     };
     for (const message of messages) {
       await this.sendText(target, message);
+    }
+  }
+
+  private async buildStatusText(binding: StoredBinding | null): Promise<string> {
+    const workspaceDir = resolveWorkspaceDir({
+      bindingWorkspaceDir: binding?.workspaceDir,
+      configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
+      serviceWorkspaceDir: this.serviceWorkspaceDir,
+    });
+    const [threadState, account, limits, projectFolder] = await Promise.all([
+      binding
+        ? this.client.readThreadState({
+            sessionKey: binding.sessionKey,
+            threadId: binding.threadId,
+          }).catch(() => undefined)
+        : Promise.resolve(undefined),
+      this.client.readAccount({
+        sessionKey: binding?.sessionKey,
+      }).catch(() => null),
+      this.client.readRateLimits({
+        sessionKey: binding?.sessionKey,
+      }).catch(() => []),
+      this.resolveProjectFolder(binding?.workspaceDir || workspaceDir),
+    ]);
+
+    return formatCodexStatusText({
+      threadState,
+      account,
+      rateLimits: limits,
+      bindingActive: Boolean(binding),
+      projectFolder,
+      worktreeFolder: threadState?.cwd?.trim() || binding?.workspaceDir || workspaceDir,
+    });
+  }
+
+  private async resolveProjectFolder(worktreeFolder?: string): Promise<string | undefined> {
+    const cwd = worktreeFolder?.trim();
+    if (!cwd) {
+      return undefined;
+    }
+    try {
+      const result = await execFileAsync(
+        "git",
+        ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        { timeout: 5_000 },
+      );
+      const commonDir = result.stdout.trim();
+      if (!commonDir) {
+        return cwd;
+      }
+      return path.dirname(commonDir);
+    } catch {
+      return cwd;
     }
   }
 

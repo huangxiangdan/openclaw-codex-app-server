@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatBoundThreadSummary, formatThreadButtonLabel } from "./format.js";
+import {
+  formatBoundThreadSummary,
+  formatCodexStatusText,
+  formatThreadButtonLabel,
+} from "./format.js";
 
 describe("formatThreadButtonLabel", () => {
   it("uses the project name instead of a worktree path prefix", () => {
@@ -53,5 +57,60 @@ describe("formatBoundThreadSummary", () => {
         "Worktree Path: /Users/huntharo/.codex/worktrees/41fb/openclaw",
       ].join("\n"),
     );
+  });
+});
+
+describe("formatCodexStatusText", () => {
+  it("matches the old operational Codex status shape", () => {
+    const text = formatCodexStatusText({
+      bindingActive: true,
+      threadState: {
+        threadId: "019cc00d-6cf4-7c11-afcd-2673db349a21",
+        threadName: "Fix Telegram approval flow",
+        model: "gpt-5.4",
+        modelProvider: "openai",
+        reasoningEffort: "high",
+        serviceTier: "default",
+        cwd: "/Users/huntharo/.codex/worktrees/41fb/openclaw",
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+      },
+      account: {
+        type: "chatgpt",
+        email: "huntharo@gmail.com",
+        planType: "pro",
+      },
+      projectFolder: "/Users/huntharo/github/openclaw",
+      worktreeFolder: "/Users/huntharo/.codex/worktrees/41fb/openclaw",
+      rateLimits: [
+        {
+          name: "5h limit",
+          usedPercent: 15,
+          resetAt: new Date("2026-03-13T10:03:00-04:00").getTime(),
+          windowSeconds: 18_000,
+        },
+        {
+          name: "Weekly limit",
+          usedPercent: 15,
+          resetAt: new Date("2026-03-14T10:03:00-04:00").getTime(),
+          windowSeconds: 604_800,
+        },
+      ],
+    });
+
+    expect(text).toContain("OpenAI Codex");
+    expect(text).toContain("Binding: active");
+    expect(text).toContain("Thread: Fix Telegram approval flow");
+    expect(text).toContain("Model: openai/gpt-5.4 · reasoning high");
+    expect(text).toContain("Project folder: ~/github/openclaw");
+    expect(text).toContain("Worktree folder: ~/.codex/worktrees/41fb/openclaw");
+    expect(text).toContain("Fast mode: off");
+    expect(text).toContain("Context usage: unavailable until Codex emits a token-usage update");
+    expect(text).toContain("Permissions: Default");
+    expect(text).toContain("Account: huntharo@gmail.com (pro)");
+    expect(text).toContain("Session: 019cc00d-6cf4-7c11-afcd-2673db349a21");
+    expect(text).toContain("Rate limits timezone:");
+    expect(text).toContain("5h limit: 85% left");
+    expect(text).toContain("Weekly limit: 85% left");
   });
 });
