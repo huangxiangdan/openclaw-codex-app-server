@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   parseThreadSelectionArgs,
@@ -22,6 +24,8 @@ describe("thread selection args", () => {
   it("parses --all without inventing a query", () => {
     expect(parseThreadSelectionArgs("--all")).toEqual({
       includeAll: true,
+      listProjects: false,
+      cwd: undefined,
       query: "",
     });
   });
@@ -29,6 +33,8 @@ describe("thread selection args", () => {
   it("parses em dash all from Telegram-style input", () => {
     expect(parseThreadSelectionArgs("—all")).toEqual({
       includeAll: true,
+      listProjects: false,
+      cwd: undefined,
       query: "",
     });
   });
@@ -36,7 +42,18 @@ describe("thread selection args", () => {
   it("parses --all with a target query", () => {
     expect(parseThreadSelectionArgs("--all thread-home")).toEqual({
       includeAll: true,
+      listProjects: false,
+      cwd: undefined,
       query: "thread-home",
+    });
+  });
+
+  it("parses --projects and expands a home-relative cwd", () => {
+    expect(parseThreadSelectionArgs("--projects --cwd ~/github/openclaw")).toEqual({
+      includeAll: false,
+      listProjects: true,
+      cwd: path.join(os.homedir(), "github/openclaw"),
+      query: "",
     });
   });
 });

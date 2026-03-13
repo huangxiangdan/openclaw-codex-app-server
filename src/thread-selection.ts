@@ -1,7 +1,11 @@
+import os from "node:os";
+import path from "node:path";
 import type { ThreadSummary } from "./types.js";
 
 export type ParsedThreadSelectionArgs = {
   includeAll: boolean;
+  listProjects: boolean;
+  cwd?: string;
   query: string;
 };
 
@@ -22,20 +26,47 @@ export function parseThreadSelectionArgs(args: string): ParsedThreadSelectionArg
     .map((token) => token.trim())
     .filter(Boolean);
   let includeAll = false;
+  let listProjects = false;
+  let cwd: string | undefined;
   const queryTokens: string[] = [];
 
-  for (const token of tokens) {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
     if (token === "--all" || token === "-a") {
       includeAll = true;
       continue;
+    }
+    if (token === "--projects" || token === "--project" || token === "-p") {
+      listProjects = true;
+      continue;
+    }
+    if (token === "--cwd") {
+      const next = tokens[index + 1]?.trim();
+      if (next) {
+        cwd = expandHomeDir(next);
+        index += 1;
+        continue;
+      }
     }
     queryTokens.push(token);
   }
 
   return {
     includeAll,
+    listProjects,
+    cwd,
     query: queryTokens.join(" ").trim(),
   };
+}
+
+function expandHomeDir(value: string): string {
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith("~/")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
 }
 
 export function selectThreadFromMatches(

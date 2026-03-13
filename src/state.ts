@@ -26,6 +26,13 @@ type PutCallbackInput =
       actionIndex: number;
       token?: string;
       ttlMs?: number;
+    }
+  | {
+      kind: "picker-view";
+      conversation: ConversationTarget;
+      view: Extract<CallbackAction, { kind: "picker-view" }>["view"];
+      token?: string;
+      ttlMs?: number;
     };
 
 function toConversationKey(target: ConversationTarget): string {
@@ -170,15 +177,24 @@ export class PluginStateStore {
             createdAt: now,
             expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
           }
-        : {
-            kind: "pending-input",
-            conversation: callback.conversation,
-            requestId: callback.requestId,
-            actionIndex: callback.actionIndex,
-            token: callback.token ?? this.createCallbackToken(),
-            createdAt: now,
-            expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
-          };
+        : callback.kind === "pending-input"
+          ? {
+              kind: "pending-input",
+              conversation: callback.conversation,
+              requestId: callback.requestId,
+              actionIndex: callback.actionIndex,
+              token: callback.token ?? this.createCallbackToken(),
+              createdAt: now,
+              expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
+            }
+          : {
+              kind: "picker-view",
+              conversation: callback.conversation,
+              view: callback.view,
+              token: callback.token ?? this.createCallbackToken(),
+              createdAt: now,
+              expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
+            };
     this.snapshot.callbacks = this.snapshot.callbacks.filter(
       (current) => current.token !== entry.token,
     );

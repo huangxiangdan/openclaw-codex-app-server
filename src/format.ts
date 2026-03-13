@@ -12,6 +12,7 @@ import type {
   ThreadSummary,
   TurnResult,
 } from "./types.js";
+import { getProjectName } from "./thread-picker.js";
 
 function formatDateAge(value?: number): string | undefined {
   if (!value) {
@@ -44,24 +45,6 @@ function truncateMiddle(value: string, maxLength: number): string {
   const left = Math.ceil(keep / 2);
   const right = Math.floor(keep / 2);
   return `${value.slice(0, left)}...${value.slice(value.length - right)}`;
-}
-
-function formatProjectBadge(projectKey?: string): string | undefined {
-  if (!projectKey) {
-    return undefined;
-  }
-  const parts = projectKey
-    .split("/")
-    .map((part) => part.trim())
-    .filter(Boolean);
-  if (parts.length === 0) {
-    return undefined;
-  }
-  const worktreesIndex = parts.lastIndexOf("worktrees");
-  if (worktreesIndex >= 0 && parts.length > worktreesIndex + 2) {
-    return `${parts[worktreesIndex + 1]}/${parts[worktreesIndex + 2]}`;
-  }
-  return parts[parts.length - 1];
 }
 
 function formatThreadButtonTitle(thread: ThreadSummary): string {
@@ -102,13 +85,55 @@ export function formatThreadPicker(threads: ThreadSummary[]): string {
 }
 
 export function formatThreadButtonLabel(thread: ThreadSummary): string {
-  const prefix = "Resume: ";
-  const projectBadge = formatProjectBadge(thread.projectKey);
+  const projectBadge = getProjectName(thread.projectKey);
   const suffix = projectBadge ? ` (${projectBadge})` : "";
   const maxLength = 72;
-  const availableTitleLength = Math.max(16, maxLength - prefix.length - suffix.length);
+  const availableTitleLength = Math.max(16, maxLength - suffix.length);
   const title = truncateMiddle(formatThreadButtonTitle(thread), availableTitleLength);
-  return `${prefix}${title}${suffix}`;
+  return `${title}${suffix}`;
+}
+
+export function formatThreadPickerIntro(params: {
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  includeAll: boolean;
+  projectName?: string;
+  workspaceDir?: string;
+}): string {
+  const pageLabel = `Page ${params.page + 1}/${params.totalPages}`;
+  const scopeLabel = params.projectName
+    ? `Showing recent Codex sessions for ${params.projectName}.`
+    : params.includeAll
+      ? "Showing recent Codex sessions across all projects."
+      : params.workspaceDir
+        ? `Showing recent Codex sessions for ${getProjectName(params.workspaceDir) ?? "this project"}.`
+        : "Showing recent Codex sessions.";
+  return [
+    `${scopeLabel} ${pageLabel}.`,
+    `Tap a session to resume it. Use Projects to browse by project or \`--cwd /path/to/project\` to narrow to one workspace.`,
+    params.totalItems === 0 ? "No matching Codex threads found." : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function formatProjectPickerIntro(params: {
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  workspaceDir?: string;
+}): string {
+  const scopeLabel = params.workspaceDir
+    ? `Showing projects for ${getProjectName(params.workspaceDir) ?? "this workspace"}.`
+    : "Choose a project to filter recent Codex sessions.";
+  return [
+    `${scopeLabel} Page ${params.page + 1}/${params.totalPages}.`,
+    "Tap a project to show only that project's sessions. Use `--cwd /path/to/project` to target one exact workspace.",
+    params.totalItems === 0 ? "No Codex projects found." : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function formatThreadState(state: ThreadState, binding: StoredBinding | null): string {

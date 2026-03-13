@@ -228,6 +228,29 @@ export type CallbackAction =
       actionIndex: number;
       createdAt: number;
       expiresAt: number;
+    }
+  | {
+      token: string;
+      kind: "picker-view";
+      conversation: ConversationRef;
+      view:
+        | {
+            mode: "threads";
+            includeAll: boolean;
+            page: number;
+            query?: string;
+            workspaceDir?: string;
+            projectName?: string;
+          }
+        | {
+            mode: "projects";
+            includeAll: boolean;
+            page: number;
+            query?: string;
+            workspaceDir?: string;
+          };
+      createdAt: number;
+      expiresAt: number;
     };
 
 export type StoreSnapshot = {

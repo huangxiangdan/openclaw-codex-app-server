@@ -16,10 +16,11 @@ import {
   formatExperimentalFeatures,
   formatMcpServers,
   formatModels,
+  formatProjectPickerIntro,
   formatReviewCompletion,
   formatSkills,
   formatThreadButtonLabel,
-  formatThreadPicker,
+  formatThreadPickerIntro,
   formatThreadReplay,
   formatThreadState,
   formatTurnCompletion,
@@ -35,6 +36,12 @@ import {
   selectThreadFromMatches,
 } from "./thread-selection.js";
 import {
+  filterThreadsByProjectName,
+  getProjectName,
+  listProjects,
+  paginateItems,
+} from "./thread-picker.js";
+import {
   INTERACTIVE_NAMESPACE,
   PLUGIN_ID,
   type CallbackAction,
@@ -48,6 +55,18 @@ type ActiveRunRecord = {
   conversation: ConversationTarget;
   workspaceDir: string;
   handle: ActiveCodexRun;
+};
+
+type PickerRender = {
+  text: string;
+  buttons: PluginInteractiveButtons | undefined;
+};
+
+type PickerResponders = {
+  conversation: ConversationTarget;
+  clear: () => Promise<void>;
+  reply: (text: string) => Promise<void>;
+  editPicker: (picker: PickerRender) => Promise<void>;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -250,6 +269,12 @@ export class CodexPluginController {
       reply: async (text) => {
         await ctx.respond.reply({ text });
       },
+      editPicker: async (picker) => {
+        await ctx.respond.editMessage({
+          text: picker.text,
+          buttons: picker.buttons,
+        });
+      },
     });
   }
 
@@ -272,6 +297,12 @@ export class CodexPluginController {
       },
       reply: async (text) => {
         await ctx.respond.reply({ text, ephemeral: true });
+      },
+      editPicker: async (picker) => {
+        await ctx.respond.editMessage({
+          text: picker.text,
+          components: this.toDiscordComponents(picker.buttons),
+        });
       },
     });
   }
@@ -397,33 +428,17 @@ export class CodexPluginController {
     channel: string,
   ): Promise<ReplyPayload> {
     const parsed = parseThreadSelectionArgs(filter);
-    const workspaceDir = resolveWorkspaceDir({
-      bindingWorkspaceDir: binding?.workspaceDir,
-      configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
-      serviceWorkspaceDir: this.serviceWorkspaceDir,
-    });
-    const threads = await this.client.listThreads({
-      sessionKey: binding?.sessionKey,
-      workspaceDir: parsed.includeAll ? undefined : workspaceDir,
-      filter: parsed.query,
-    });
-    const top = threads.slice(0, 10);
-    const buttons = conversation
-      ? await this.buildThreadButtons(
-          conversation,
-          parsed.includeAll ? "" : workspaceDir,
-          top,
-        )
-      : undefined;
-    if (isDiscordChannel(channel) && conversation && top.length > 0) {
-      await this.sendDiscordPicker(
-        conversation,
-        top,
-        parsed.includeAll ? "" : workspaceDir,
-      );
+    if (!conversation) {
+      return { text: "This command needs a Telegram or Discord conversation." };
+    }
+    const picker = parsed.listProjects
+      ? await this.renderProjectPicker(conversation, binding, parsed, 0)
+      : await this.renderThreadPicker(conversation, binding, parsed, 0);
+    if (isDiscordChannel(channel) && picker.buttons) {
+      await this.sendDiscordPicker(conversation, picker);
       return { text: "Sent a Codex thread picker to this Discord conversation." };
     }
-    return buildReplyWithButtons(formatThreadPicker(top), buttons);
+    return buildReplyWithButtons(picker.text, picker.buttons);
   }
 
   private async handleJoinCommand(
@@ -436,45 +451,45 @@ export class CodexPluginController {
       return { text: "This command needs a Telegram or Discord conversation." };
     }
     const parsed = parseThreadSelectionArgs(args);
-    const workspaceDir = resolveWorkspaceDir({
-      bindingWorkspaceDir: binding?.workspaceDir,
-      configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
-      serviceWorkspaceDir: this.serviceWorkspaceDir,
-    });
-    if (!parsed.query) {
-      return await this.handleListCommand(
-        conversation,
-        binding,
+    if (parsed.listProjects || !parsed.query) {
+      const passthroughArgs = [
         parsed.includeAll ? "--all" : "",
-        channel,
-      );
+        parsed.listProjects ? "--projects" : "",
+        parsed.cwd ? `--cwd ${parsed.cwd}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      return await this.handleListCommand(conversation, binding, passthroughArgs, channel);
     }
+    const workspaceDir = this.resolveThreadWorkspaceDir(parsed, binding, false);
     const selection = await this.resolveSingleThread(
       binding?.sessionKey,
-      parsed.includeAll ? undefined : workspaceDir,
+      workspaceDir,
       parsed.query,
     );
     if (selection.kind === "none") {
       return { text: `No Codex thread matched "${parsed.query}".` };
     }
     if (selection.kind === "ambiguous") {
-      const top = selection.threads.slice(0, 10);
-      const pickerWorkspaceDir = parsed.includeAll ? "" : workspaceDir;
-      const buttons = await this.buildThreadButtons(conversation, pickerWorkspaceDir, top);
-      if (isDiscordChannel(channel) && top.length > 0) {
-        await this.sendDiscordPicker(conversation, top, pickerWorkspaceDir);
+      const picker = await this.renderThreadPicker(conversation, binding, parsed, 0);
+      if (isDiscordChannel(channel) && picker.buttons) {
+        await this.sendDiscordPicker(conversation, picker);
         return {
           text: `Multiple Codex threads matched "${parsed.query}". Sent a picker to this Discord conversation.`,
         };
       }
-      return buildReplyWithButtons(
-        `Multiple Codex threads matched "${parsed.query}".\n\n${formatThreadPicker(top)}`,
-        buttons,
-      );
+      return buildReplyWithButtons(picker.text, picker.buttons);
     }
     await this.bindConversation(conversation, {
       threadId: selection.thread.threadId,
-      workspaceDir: selection.thread.projectKey || workspaceDir,
+      workspaceDir:
+        selection.thread.projectKey ||
+        workspaceDir ||
+        resolveWorkspaceDir({
+          bindingWorkspaceDir: binding?.workspaceDir,
+          configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
+          serviceWorkspaceDir: this.serviceWorkspaceDir,
+        }),
       threadTitle: selection.thread.title,
     });
     return {
@@ -907,25 +922,70 @@ export class CodexPluginController {
     return rows;
   }
 
-  private async buildThreadButtons(
-    conversation: ConversationTarget,
-    workspaceDir: string,
-    threads: Array<{ threadId: string; title?: string; projectKey?: string }>,
-  ): Promise<PluginInteractiveButtons | undefined> {
-    if (threads.length === 0) {
+  private resolveThreadWorkspaceDir(
+    parsed: ReturnType<typeof parseThreadSelectionArgs>,
+    binding: StoredBinding | null,
+    useAllProjectsDefault: boolean,
+  ): string | undefined {
+    if (parsed.cwd) {
+      return parsed.cwd;
+    }
+    if (parsed.includeAll || useAllProjectsDefault) {
+      return undefined;
+    }
+    return resolveWorkspaceDir({
+      bindingWorkspaceDir: binding?.workspaceDir,
+      configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
+      serviceWorkspaceDir: this.serviceWorkspaceDir,
+    });
+  }
+
+  private async listPickerThreads(
+    binding: StoredBinding | null,
+    params: {
+      parsed: ReturnType<typeof parseThreadSelectionArgs>;
+      projectName?: string;
+      filterProjectsOnly?: boolean;
+    },
+  ) {
+    const workspaceDir = this.resolveThreadWorkspaceDir(
+      params.parsed,
+      binding,
+      params.filterProjectsOnly || Boolean(params.projectName),
+    );
+    const threads = await this.client.listThreads({
+      sessionKey: binding?.sessionKey,
+      workspaceDir,
+      filter: params.filterProjectsOnly ? undefined : params.parsed.query || undefined,
+    });
+    return {
+      workspaceDir,
+      threads: filterThreadsByProjectName(threads, params.projectName),
+    };
+  }
+
+  private async buildThreadPickerButtons(params: {
+    conversation: ConversationTarget;
+    threads: Array<{ threadId: string; title?: string; projectKey?: string }>;
+    showProjectName: boolean;
+  }): Promise<PluginInteractiveButtons | undefined> {
+    if (params.threads.length === 0) {
       return undefined;
     }
     const rows: PluginInteractiveButtons = [];
-    for (const thread of threads) {
+    for (const thread of params.threads) {
       const callback = await this.store.putCallback({
         kind: "resume-thread",
-        conversation,
+        conversation: params.conversation,
         threadId: thread.threadId,
-        workspaceDir,
+        workspaceDir: thread.projectKey?.trim() || this.settings.defaultWorkspaceDir || process.cwd(),
       });
       rows.push([
         {
-          text: formatThreadButtonLabel(thread),
+          text: formatThreadButtonLabel({
+            ...thread,
+            projectKey: params.showProjectName ? thread.projectKey : undefined,
+          }),
           callback_data: `${INTERACTIVE_NAMESPACE}:${callback.token}`,
         },
       ]);
@@ -933,20 +993,242 @@ export class CodexPluginController {
     return rows;
   }
 
+  private async appendThreadPickerControls(params: {
+    conversation: ConversationTarget;
+    buttons: PluginInteractiveButtons;
+    parsed: ReturnType<typeof parseThreadSelectionArgs>;
+    projectName?: string;
+    page: number;
+    totalPages: number;
+  }): Promise<PluginInteractiveButtons> {
+    if (params.totalPages > 1) {
+      const navRow: PluginInteractiveButtons[number] = [];
+      if (params.page > 0) {
+        const prev = await this.store.putCallback({
+          kind: "picker-view",
+          conversation: params.conversation,
+          view: {
+            mode: "threads",
+            includeAll: params.parsed.includeAll,
+            workspaceDir: params.parsed.cwd,
+            query: params.parsed.query || undefined,
+            projectName: params.projectName,
+            page: params.page - 1,
+          },
+        });
+        navRow.push({
+          text: "◀ Prev",
+          callback_data: `${INTERACTIVE_NAMESPACE}:${prev.token}`,
+        });
+      }
+      if (params.page + 1 < params.totalPages) {
+        const next = await this.store.putCallback({
+          kind: "picker-view",
+          conversation: params.conversation,
+          view: {
+            mode: "threads",
+            includeAll: params.parsed.includeAll,
+            workspaceDir: params.parsed.cwd,
+            query: params.parsed.query || undefined,
+            projectName: params.projectName,
+            page: params.page + 1,
+          },
+        });
+        navRow.push({
+          text: "Next ▶",
+          callback_data: `${INTERACTIVE_NAMESPACE}:${next.token}`,
+        });
+      }
+      if (navRow.length > 0) {
+        params.buttons.push(navRow);
+      }
+    }
+
+    const projects = await this.store.putCallback({
+      kind: "picker-view",
+      conversation: params.conversation,
+      view: {
+        mode: "projects",
+        includeAll: true,
+        workspaceDir: params.parsed.cwd,
+        page: 0,
+      },
+    });
+    params.buttons.push([
+      {
+        text: params.projectName ? "Projects" : "Browse Projects",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${projects.token}`,
+      },
+    ]);
+    return params.buttons;
+  }
+
+  private async renderThreadPicker(
+    conversation: ConversationTarget,
+    binding: StoredBinding | null,
+    parsed: ReturnType<typeof parseThreadSelectionArgs>,
+    page: number,
+    projectName?: string,
+  ): Promise<PickerRender> {
+    const { workspaceDir, threads } = await this.listPickerThreads(binding, {
+      parsed,
+      projectName,
+    });
+    const pageResult = paginateItems(threads, page);
+    const distinctProjects = new Set(
+      threads.map((thread) => getProjectName(thread.projectKey)).filter(Boolean),
+    );
+    const threadButtons =
+      (await this.buildThreadPickerButtons({
+      conversation,
+      threads: pageResult.items,
+      showProjectName: !projectName && distinctProjects.size > 1,
+      })) ?? [];
+    return {
+      text: formatThreadPickerIntro({
+        page: pageResult.page,
+        totalPages: pageResult.totalPages,
+        totalItems: pageResult.totalItems,
+        includeAll: workspaceDir == null,
+        workspaceDir,
+        projectName,
+      }),
+      buttons: await this.appendThreadPickerControls({
+            conversation,
+            buttons: threadButtons,
+            parsed,
+            projectName,
+            page: pageResult.page,
+            totalPages: pageResult.totalPages,
+          }),
+    };
+  }
+
+  private async renderProjectPicker(
+    conversation: ConversationTarget,
+    binding: StoredBinding | null,
+    parsed: ReturnType<typeof parseThreadSelectionArgs>,
+    page: number,
+  ): Promise<PickerRender> {
+    const { workspaceDir, threads } = await this.listPickerThreads(binding, {
+      parsed,
+      filterProjectsOnly: true,
+    });
+    const projects = paginateItems(listProjects(threads, parsed.query), page);
+    const buttons: PluginInteractiveButtons = [];
+    for (const project of projects.items) {
+      const callback = await this.store.putCallback({
+        kind: "picker-view",
+        conversation,
+        view: {
+          mode: "threads",
+          includeAll: true,
+          workspaceDir: parsed.cwd,
+          projectName: project.name,
+          page: 0,
+        },
+      });
+      buttons.push([
+        {
+          text: `${project.name} (${project.threadCount})`,
+          callback_data: `${INTERACTIVE_NAMESPACE}:${callback.token}`,
+        },
+      ]);
+    }
+
+    if (projects.totalPages > 1) {
+      const navRow: PluginInteractiveButtons[number] = [];
+      if (projects.page > 0) {
+        const prev = await this.store.putCallback({
+          kind: "picker-view",
+          conversation,
+          view: {
+            mode: "projects",
+            includeAll: true,
+            workspaceDir: parsed.cwd,
+            query: parsed.query || undefined,
+            page: projects.page - 1,
+          },
+        });
+        navRow.push({
+          text: "◀ Prev",
+          callback_data: `${INTERACTIVE_NAMESPACE}:${prev.token}`,
+        });
+      }
+      if (projects.page + 1 < projects.totalPages) {
+        const next = await this.store.putCallback({
+          kind: "picker-view",
+          conversation,
+          view: {
+            mode: "projects",
+            includeAll: true,
+            workspaceDir: parsed.cwd,
+            query: parsed.query || undefined,
+            page: projects.page + 1,
+          },
+        });
+        navRow.push({
+          text: "Next ▶",
+          callback_data: `${INTERACTIVE_NAMESPACE}:${next.token}`,
+        });
+      }
+      if (navRow.length > 0) {
+        buttons.push(navRow);
+      }
+    }
+
+    const recent = await this.store.putCallback({
+      kind: "picker-view",
+      conversation,
+      view: {
+        mode: "threads",
+        includeAll: true,
+        workspaceDir: parsed.cwd,
+        page: 0,
+      },
+    });
+    buttons.push([
+      {
+        text: "Recent Sessions",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${recent.token}`,
+      },
+    ]);
+
+    return {
+      text: formatProjectPickerIntro({
+        page: projects.page,
+        totalPages: projects.totalPages,
+        totalItems: projects.totalItems,
+        workspaceDir,
+      }),
+      buttons,
+    };
+  }
+
+  private toDiscordComponents(buttons: PluginInteractiveButtons | undefined): unknown[] | undefined {
+    if (!buttons || buttons.length === 0) {
+      return undefined;
+    }
+    return buttons.map((row) => ({
+      type: 1,
+      components: row.map((button) => ({
+        type: 2,
+        style: 1,
+        label: button.text,
+        custom_id: button.callback_data,
+      })),
+    }));
+  }
+
   private async sendDiscordPicker(
     conversation: ConversationTarget,
-    threads: Array<{ threadId: string; title?: string; projectKey?: string }>,
-    workspaceDir: string,
+    picker: PickerRender,
   ): Promise<void> {
-    const buttons = await this.buildThreadButtons(conversation, workspaceDir, threads);
-    if (!buttons) {
-      return;
-    }
     await this.api.runtime.channel.discord.sendComponentMessage(
       conversation.conversationId,
       {
-        text: formatThreadPicker(threads),
-        blocks: buttons.map((row) => ({
+        text: picker.text,
+        blocks: (picker.buttons ?? []).map((row) => ({
           type: "actions" as const,
           buttons: row.map((button) => ({
             label: button.text,
@@ -963,14 +1245,10 @@ export class CodexPluginController {
 
   private async dispatchCallbackAction(
     callback: CallbackAction,
-    responders: {
-      conversation: ConversationTarget;
-      clear: () => Promise<void>;
-      reply: (text: string) => Promise<void>;
-    },
+    responders: PickerResponders,
   ): Promise<void> {
-    await responders.clear().catch(() => undefined);
     if (callback.kind === "resume-thread") {
+      await responders.clear().catch(() => undefined);
       await this.bindConversation(callback.conversation, {
         threadId: callback.threadId,
         workspaceDir: callback.workspaceDir,
@@ -982,6 +1260,7 @@ export class CodexPluginController {
       return;
     }
     if (callback.kind === "pending-input") {
+      await responders.clear().catch(() => undefined);
       const pending = this.store.getPendingRequestById(callback.requestId);
       if (!pending || pending.state.expiresAt <= Date.now()) {
         await this.store.removeCallback(callback.token);
@@ -1000,7 +1279,27 @@ export class CodexPluginController {
       }
       await this.store.removeCallback(callback.token);
       await responders.reply("Sent to Codex.");
+      return;
     }
+    const binding = this.store.getBinding(callback.conversation);
+    await this.store.removeCallback(callback.token);
+    const parsed = {
+      includeAll: callback.view.includeAll,
+      listProjects: callback.view.mode === "projects",
+      cwd: callback.view.workspaceDir,
+      query: callback.view.query ?? "",
+    };
+    const picker =
+      callback.view.mode === "projects"
+        ? await this.renderProjectPicker(responders.conversation, binding, parsed, callback.view.page)
+        : await this.renderThreadPicker(
+            responders.conversation,
+            binding,
+            parsed,
+            callback.view.page,
+            callback.view.projectName,
+          );
+    await responders.editPicker(picker);
   }
 
   private async resolveSingleThread(
