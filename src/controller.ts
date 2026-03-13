@@ -13,6 +13,7 @@ import { CodexAppServerClient, type ActiveCodexRun, isMissingThreadError } from 
 import {
   formatAccountSummary,
   formatBinding,
+  formatBoundThreadSummary,
   formatExperimentalFeatures,
   formatMcpServers,
   formatModels,
@@ -21,7 +22,6 @@ import {
   formatSkills,
   formatThreadButtonLabel,
   formatThreadPickerIntro,
-  formatThreadReplay,
   formatThreadState,
   formatTurnCompletion,
 } from "./format.js";
@@ -56,6 +56,8 @@ type ActiveRunRecord = {
   workspaceDir: string;
   handle: ActiveCodexRun;
 };
+
+const NO_REPLY = "NO_REPLY";
 
 type PickerRender = {
   text: string;
@@ -489,33 +491,19 @@ export class CodexPluginController {
           bindingWorkspaceDir: binding?.workspaceDir,
           configuredWorkspaceDir: this.settings.defaultWorkspaceDir,
           serviceWorkspaceDir: this.serviceWorkspaceDir,
-        }),
+      }),
       threadTitle: selection.thread.title,
     });
-    return {
-      text:
-        `Bound this conversation to Codex thread ${selection.thread.threadId}.\n` +
-        `Plain text in this bound conversation routes to Codex.`,
-    };
+    await this.sendBoundConversationSummary(conversation);
+    return { text: NO_REPLY };
   }
 
   private async handleStatusCommand(binding: StoredBinding | null): Promise<ReplyPayload> {
     if (!binding) {
       return { text: "No Codex binding for this conversation." };
     }
-    const [state, replay] = await Promise.all([
-      this.client.readThreadState({
-        sessionKey: binding.sessionKey,
-        threadId: binding.threadId,
-      }),
-      this.client.readThreadContext({
-        sessionKey: binding.sessionKey,
-        threadId: binding.threadId,
-      }).catch(() => ({})),
-    ]);
-    return {
-      text: `${formatThreadState(state, binding)}\n\n${formatThreadReplay(replay)}`.trim(),
-    };
+    await this.sendBoundConversationSummary(binding.conversation);
+    return { text: NO_REPLY };
   }
 
   private async handleStopCommand(conversation: ConversationTarget | null): Promise<ReplyPayload> {
@@ -1254,9 +1242,7 @@ export class CodexPluginController {
         workspaceDir: callback.workspaceDir,
       });
       await this.store.removeCallback(callback.token);
-      await responders.reply(
-        `Bound this conversation to Codex thread ${callback.threadId}.\nPlain text in this bound conversation routes to Codex.`,
-      );
+      await this.sendBoundConversationSummary(callback.conversation);
       return;
     }
     if (callback.kind === "pending-input") {
@@ -1362,6 +1348,94 @@ export class CodexPluginController {
     }
     await this.store.upsertBinding(record);
     return record;
+  }
+
+  private trimReplayText(value?: string, maxLength = 1200): string | undefined {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    if (trimmed.length <= maxLength) {
+      return trimmed;
+    }
+    return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+  }
+
+  private async buildBoundConversationMessages(
+    conversation: ConversationTarget | ConversationRef,
+  ): Promise<string[]> {
+    const binding = this.store.getBinding({
+      channel: conversation.channel,
+      accountId: conversation.accountId,
+      conversationId: conversation.conversationId,
+      parentConversationId: conversation.parentConversationId,
+    });
+    if (!binding) {
+      return ["No Codex binding for this conversation."];
+    }
+
+    const [state, replay] = await Promise.all([
+      this.client.readThreadState({
+        sessionKey: binding.sessionKey,
+        threadId: binding.threadId,
+      }),
+      this.client.readThreadContext({
+        sessionKey: binding.sessionKey,
+        threadId: binding.threadId,
+      }).catch(() => ({ lastUserMessage: undefined, lastAssistantMessage: undefined })),
+    ]);
+
+    const nextBinding =
+      (state.threadName && state.threadName !== binding.threadTitle) ||
+      (state.cwd?.trim() && state.cwd.trim() !== binding.workspaceDir)
+        ? {
+            ...binding,
+            threadTitle: state.threadName?.trim() || binding.threadTitle,
+            workspaceDir: state.cwd?.trim() || binding.workspaceDir,
+            updatedAt: Date.now(),
+          }
+        : binding;
+
+    if (nextBinding !== binding) {
+      await this.store.upsertBinding(nextBinding);
+    }
+
+    const messages = [
+      formatBoundThreadSummary({
+      binding: nextBinding,
+      state,
+      }),
+    ];
+
+    const lastUser = this.trimReplayText(replay.lastUserMessage);
+    if (lastUser) {
+      messages.push("Last User Request in Thread:");
+      messages.push(lastUser);
+    }
+
+    const lastAssistant = this.trimReplayText(replay.lastAssistantMessage);
+    if (lastAssistant) {
+      messages.push("Last Agent Reply in Thread:");
+      messages.push(lastAssistant);
+    }
+
+    return messages;
+  }
+
+  private async sendBoundConversationSummary(
+    conversation: ConversationTarget | ConversationRef,
+  ): Promise<void> {
+    const messages = await this.buildBoundConversationMessages(conversation);
+    const target: ConversationTarget = {
+      channel: conversation.channel,
+      accountId: conversation.accountId,
+      conversationId: conversation.conversationId,
+      parentConversationId: conversation.parentConversationId,
+      threadId: "threadId" in conversation ? conversation.threadId : undefined,
+    };
+    for (const message of messages) {
+      await this.sendText(target, message);
+    }
   }
 
   private async unbindConversation(conversation: ConversationTarget): Promise<void> {

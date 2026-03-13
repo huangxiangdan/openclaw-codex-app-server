@@ -51,6 +51,11 @@ function formatThreadButtonTitle(thread: ThreadSummary): string {
   return thread.title?.trim() || thread.threadId;
 }
 
+function isLikelyWorktreePath(value?: string): boolean {
+  const trimmed = value?.trim();
+  return Boolean(trimmed && /[/\\]worktrees[/\\][^/\\]+[/\\][^/\\]+/.test(trimmed));
+}
+
 export function formatBinding(binding: StoredBinding | null): string {
   if (!binding) {
     return "No Codex binding for this conversation.";
@@ -150,6 +155,29 @@ export function formatThreadState(state: ThreadState, binding: StoredBinding | n
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function formatBoundThreadSummary(params: {
+  binding: StoredBinding;
+  state?: ThreadState;
+}): string {
+  const workspacePath = params.state?.cwd?.trim() || params.binding.workspaceDir;
+  const projectName =
+    getProjectName(workspacePath) ||
+    getProjectName(params.binding.workspaceDir) ||
+    "Unknown";
+  const threadName =
+    params.state?.threadName?.trim() ||
+    params.binding.threadTitle?.trim();
+  const parts = [
+    "Codex thread bound.",
+    `Project: ${projectName}`,
+    threadName ? `Thread Name: ${threadName}` : "",
+    `Thread ID: ${params.binding.threadId}`,
+    isLikelyWorktreePath(workspacePath) ? `Worktree Path: ${workspacePath}` : "",
+    !isLikelyWorktreePath(workspacePath) && workspacePath ? `Project Path: ${workspacePath}` : "",
+  ].filter(Boolean);
+  return parts.join("\n");
 }
 
 export function formatAccountSummary(account: AccountSummary, limits: RateLimitSummary[]): string {
