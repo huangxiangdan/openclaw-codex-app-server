@@ -115,6 +115,12 @@ async function createControllerHarness() {
       lastUserMessage: undefined,
       lastAssistantMessage: undefined,
     })),
+    readAccount: vi.fn(async () => ({
+      email: "test@example.com",
+      planType: "pro",
+      type: "chatgpt",
+    })),
+    readRateLimits: vi.fn(async () => []),
   };
   (controller as any).client = clientMock;
   (controller as any).readThreadHasChanges = vi.fn(async () => false);
@@ -391,11 +397,43 @@ describe("Discord controller flows", () => {
     } as any);
 
     expect(sendComponentMessage).toHaveBeenCalledWith(
-      "channel:1481858418548412579",
+      "channel:chan-1",
       expect.objectContaining({
         text: expect.stringContaining("Choose a project to filter recent Codex sessions"),
       }),
       expect.objectContaining({ accountId: "default" }),
+    );
+  });
+
+  it("hydrates a pending approved binding when status is requested after core approval", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertPendingBind({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "channel:chan-1",
+      },
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      threadTitle: "Discord Thread",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand("codex_status", buildDiscordCommandContext({
+      commandBody: "/codex_status",
+      getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
+    }));
+
+    expect(reply.text).toContain("Binding: active");
+    expect((controller as any).store.getBinding({
+      channel: "discord",
+      accountId: "default",
+      conversationId: "channel:chan-1",
+    })).toEqual(
+      expect.objectContaining({
+        threadId: "thread-1",
+        workspaceDir: "/repo/openclaw",
+      }),
     );
   });
 

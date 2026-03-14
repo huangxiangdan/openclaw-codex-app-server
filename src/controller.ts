@@ -515,7 +515,9 @@ export class CodexPluginController {
         this.activeRuns.delete(activeKey);
         await active.handle.interrupt().catch(() => undefined);
       }
-      const resolvedBinding = this.store.getBinding(conversation);
+      const resolvedBinding =
+        this.store.getBinding(conversation) ??
+        (await this.hydrateApprovedBinding(conversation));
       this.api.logger.debug?.(
         `codex inbound claim channel=${conversation.channel} account=${conversation.accountId} conversation=${conversation.conversationId} parent=${conversation.parentConversationId ?? "<none>"} local=${resolvedBinding ? "yes" : "no"}`,
       );
@@ -595,10 +597,16 @@ export class CodexPluginController {
       await ctx.respond.reply({ text: "That Codex action expired. Please retry the command.", ephemeral: true });
       return;
     }
-    const conversationId = normalizeDiscordInteractiveConversationId({
-      conversationId: ctx.conversationId,
-      guildId: ctx.guildId,
-    });
+    const callbackConversationId =
+      callback.conversation.channel === "discord"
+        ? normalizeDiscordConversationId(callback.conversation.conversationId)
+        : undefined;
+    const conversationId =
+      callbackConversationId ??
+      normalizeDiscordInteractiveConversationId({
+        conversationId: ctx.conversationId,
+        guildId: ctx.guildId,
+      });
     if (!conversationId) {
       await ctx.respond.reply({
         text: "I couldn’t determine the Discord conversation for that action. Please retry the command.",
@@ -606,77 +614,73 @@ export class CodexPluginController {
       });
       return;
     }
-    await this.dispatchCallbackAction(callback, {
-      conversation: {
-        channel: "discord",
-        accountId: ctx.accountId,
-        conversationId,
-        parentConversationId: ctx.parentConversationId,
-      },
-      clear: async () => {
-        try {
-          await ctx.respond.clearComponents();
-        } catch {
-          await ctx.respond.acknowledge().catch(() => undefined);
-        }
-      },
-      reply: async (text) => {
-        await ctx.respond.reply({ text, ephemeral: true });
-      },
-      editPicker: async (picker) => {
-        this.api.logger.debug(
-          `codex discord picker refresh conversation=${conversationId} rows=${picker.buttons?.length ?? 0}`,
-        );
-        await ctx.respond.clearComponents({ text: picker.text }).catch((error) => {
-          const detail = String(error);
-          if (detail.includes("already been acknowledged")) {
-            this.api.logger.debug?.(
-              `codex discord picker clear skipped conversation=${conversationId}: ${detail}`,
-            );
-            return;
+    const conversation: ConversationTarget = {
+      channel: "discord",
+      accountId: callback.conversation.accountId ?? ctx.accountId,
+      conversationId,
+      parentConversationId: callback.conversation.parentConversationId ?? ctx.parentConversationId,
+    };
+    try {
+      await this.dispatchCallbackAction(callback, {
+        conversation,
+        clear: async () => {
+          try {
+            await ctx.respond.clearComponents();
+          } catch {
+            await ctx.respond.acknowledge().catch(() => undefined);
           }
-          this.api.logger.warn(
-            `codex discord picker clear failed conversation=${conversationId}: ${detail}`,
+        },
+        reply: async (text) => {
+          await ctx.respond.reply({ text, ephemeral: true });
+        },
+        editPicker: async (picker) => {
+          this.api.logger.debug(
+            `codex discord picker refresh conversation=${conversationId} rows=${picker.buttons?.length ?? 0}`,
           );
-        });
-        await this.sendDiscordPicker(
-          {
-            channel: "discord",
-            accountId: ctx.accountId,
-            conversationId,
-            parentConversationId: ctx.parentConversationId,
-          },
-          picker,
-        );
-      },
-      requestConversationBinding: async (params) => {
-        const requestConversationBinding = bindingApi.requestConversationBinding;
-        if (!requestConversationBinding) {
-          return { status: "error", message: "Conversation binding is unavailable." } as const;
-        }
-        const result = await requestConversationBinding(params);
-        if (result.status === "pending") {
-          const telegramData = asRecord(result.reply.channelData?.telegram);
-          const buttons = Array.isArray(telegramData?.buttons)
-            ? (telegramData.buttons as PluginInteractiveButtons)
-            : undefined;
-          await this.sendDiscordPicker(
-            {
-              channel: "discord",
-              accountId: ctx.accountId,
-              conversationId,
-              parentConversationId: ctx.parentConversationId,
-            },
-            {
+          await ctx.respond.clearComponents({ text: picker.text }).catch((error) => {
+            const detail = String(error);
+            if (detail.includes("already been acknowledged")) {
+              this.api.logger.debug?.(
+                `codex discord picker clear skipped conversation=${conversationId}: ${detail}`,
+              );
+              return;
+            }
+            this.api.logger.warn(
+              `codex discord picker clear failed conversation=${conversationId}: ${detail}`,
+            );
+          });
+          await this.sendDiscordPicker(conversation, picker);
+        },
+        requestConversationBinding: async (params) => {
+          const requestConversationBinding = bindingApi.requestConversationBinding;
+          if (!requestConversationBinding) {
+            return { status: "error", message: "Conversation binding is unavailable." } as const;
+          }
+          const result = await requestConversationBinding(params);
+          if (result.status === "pending") {
+            const telegramData = asRecord(result.reply.channelData?.telegram);
+            const buttons = Array.isArray(telegramData?.buttons)
+              ? (telegramData.buttons as PluginInteractiveButtons)
+              : undefined;
+            await this.sendDiscordPicker(conversation, {
               text: result.reply.text ?? "Bind approval requested.",
               buttons,
-            },
-          );
-          return { status: "pending", reply: result.reply } as const;
-        }
-        return result;
-      },
-    });
+            });
+            return { status: "pending", reply: result.reply } as const;
+          }
+          return result;
+        },
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+      this.api.logger.warn(`codex discord interactive failed conversation=${conversationId}: ${detail}`);
+      await ctx.respond
+        .reply({
+          text: "Codex hit an error handling that action. Please retry the command.",
+          ephemeral: true,
+        })
+        .catch(() => undefined);
+    }
   }
 
   async handleCommand(commandName: string, ctx: PluginCommandContext): Promise<ReplyPayload> {
@@ -687,7 +691,11 @@ export class CodexPluginController {
       conversation && bindingApi.getCurrentConversationBinding
         ? await bindingApi.getCurrentConversationBinding()
         : null;
-    const binding = conversation && currentBinding ? this.store.getBinding(conversation) : null;
+    const binding =
+      conversation && currentBinding
+        ? this.store.getBinding(conversation) ??
+          (await this.hydrateApprovedBinding(conversation))
+        : null;
     const args = ctx.args?.trim() ?? "";
     if (isDiscordChannel(ctx.channel)) {
       this.api.logger.debug(
@@ -2457,6 +2465,26 @@ export class CodexPluginController {
     return record;
   }
 
+  private async hydrateApprovedBinding(
+    conversation: ConversationTarget,
+  ): Promise<StoredBinding | null> {
+    const existing = this.store.getBinding(conversation);
+    if (existing) {
+      return existing;
+    }
+    const pending = this.store.getPendingBind(conversation);
+    if (!pending) {
+      return null;
+    }
+    const binding = await this.bindConversation(conversation, {
+      threadId: pending.threadId,
+      workspaceDir: pending.workspaceDir,
+      threadTitle: pending.threadTitle,
+    });
+    await this.store.removePendingBind(conversation);
+    return binding;
+  }
+
   private async requestConversationBinding(
     conversation: ConversationTarget,
     params: {
@@ -2486,6 +2514,20 @@ export class CodexPluginController {
       summary: `Bind this conversation to Codex thread ${params.threadTitle?.trim() || params.threadId}.`,
     });
     if (approval.status !== "bound") {
+      if (approval.status === "pending") {
+        await this.store.upsertPendingBind({
+          conversation: {
+            channel: conversation.channel,
+            accountId: conversation.accountId,
+            conversationId: conversation.conversationId,
+            parentConversationId: conversation.parentConversationId,
+          },
+          threadId: params.threadId,
+          workspaceDir: params.workspaceDir,
+          threadTitle: params.threadTitle,
+          updatedAt: Date.now(),
+        });
+      }
       return approval;
     }
     const binding = await this.bindConversation(conversation, params);

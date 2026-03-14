@@ -7,6 +7,7 @@ import type {
   ConversationTarget,
   StoreSnapshot,
   StoredBinding,
+  StoredPendingBind,
   StoredPendingRequest,
 } from "./types.js";
 
@@ -82,6 +83,7 @@ function cloneSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
   return {
     version: STORE_VERSION,
     bindings: value?.bindings ?? [],
+    pendingBinds: value?.pendingBinds ?? [],
     pendingRequests: value?.pendingRequests ?? [],
     callbacks: value?.callbacks ?? [],
   };
@@ -123,6 +125,9 @@ export class PluginStateStore {
   }
 
   pruneExpired(now = Date.now()): void {
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (entry) => now - entry.updatedAt < CALLBACK_TTL_MS,
+    );
     this.snapshot.pendingRequests = this.snapshot.pendingRequests.filter(
       (entry) => entry.state.expiresAt > now,
     );
@@ -141,6 +146,9 @@ export class PluginStateStore {
   async upsertBinding(binding: StoredBinding): Promise<void> {
     const key = toConversationKey(binding.conversation);
     this.snapshot.bindings = this.snapshot.bindings.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
       (entry) => toConversationKey(entry.conversation) !== key,
     );
     this.snapshot.bindings.push(binding);
@@ -167,6 +175,31 @@ export class PluginStateStore {
       this.snapshot.pendingRequests.find((entry) => toConversationKey(entry.conversation) === key) ??
       null
     );
+  }
+
+  getPendingBind(target: ConversationTarget): StoredPendingBind | null {
+    const key = toConversationKey(target);
+    return (
+      this.snapshot.pendingBinds.find((entry) => toConversationKey(entry.conversation) === key) ??
+      null
+    );
+  }
+
+  async upsertPendingBind(entry: StoredPendingBind): Promise<void> {
+    const key = toConversationKey(entry.conversation);
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (current) => toConversationKey(current.conversation) !== key,
+    );
+    this.snapshot.pendingBinds.push(entry);
+    await this.save();
+  }
+
+  async removePendingBind(target: ConversationTarget): Promise<void> {
+    const key = toConversationKey(target);
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    await this.save();
   }
 
   getPendingRequestById(requestId: string): StoredPendingRequest | null {

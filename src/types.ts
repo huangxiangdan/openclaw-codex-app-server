@@ -248,6 +248,14 @@ export type StoredBinding = {
   updatedAt: number;
 };
 
+export type StoredPendingBind = {
+  conversation: ConversationRef;
+  threadId: string;
+  workspaceDir: string;
+  threadTitle?: string;
+  updatedAt: number;
+};
+
 export type StoredPendingRequest = {
   requestId: string;
   conversation: ConversationRef;
@@ -342,6 +350,7 @@ export type CallbackAction =
 export type StoreSnapshot = {
   version: number;
   bindings: StoredBinding[];
+  pendingBinds: StoredPendingBind[];
   pendingRequests: StoredPendingRequest[];
   callbacks: CallbackAction[];
 };

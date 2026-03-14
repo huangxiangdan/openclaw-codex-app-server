@@ -19,6 +19,17 @@ describe("state store", () => {
   it("persists bindings and callbacks", async () => {
     const dir = await makeStoreDir();
     const store = await makeStore(dir);
+    await store.upsertPendingBind({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "124",
+      },
+      threadId: "thread-pending",
+      workspaceDir: "/tmp/pending",
+      threadTitle: "Pending thread",
+      updatedAt: Date.now(),
+    });
     await store.upsertBinding({
       conversation: {
         channel: "telegram",
@@ -78,6 +89,11 @@ describe("state store", () => {
 
     expect(reloaded.listBindings()).toHaveLength(1);
     expect(reloaded.listBindings()[0]?.contextUsage?.totalTokens).toBe(9_800);
+    expect(reloaded.getPendingBind({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "124",
+    })?.threadId).toBe("thread-pending");
     expect(reloaded.getCallback(callback.token)?.kind).toBe("resume-thread");
     const resumeCallback = reloaded.getCallback(callback.token);
     expect(resumeCallback?.kind).toBe("resume-thread");
@@ -131,5 +147,39 @@ describe("state store", () => {
     expect(store.getPendingRequestById("req-1")).toBeNull();
     expect(store.getCallback(callback.token)).toBeNull();
     expect(store.getCallback(questionnaireCallback.token)).toBeNull();
+  });
+
+  it("clears a pending bind when the binding is finalized", async () => {
+    const store = await makeStore();
+    await store.upsertPendingBind({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "user:1",
+      },
+      threadId: "thread-1",
+      workspaceDir: "/tmp/work",
+      updatedAt: Date.now(),
+    });
+
+    await store.upsertBinding({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "user:1",
+      },
+      sessionKey: buildPluginSessionKey("thread-1"),
+      threadId: "thread-1",
+      workspaceDir: "/tmp/work",
+      updatedAt: Date.now(),
+    });
+
+    expect(
+      store.getPendingBind({
+        channel: "discord",
+        accountId: "default",
+        conversationId: "user:1",
+      }),
+    ).toBeNull();
   });
 });

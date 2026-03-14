@@ -10,7 +10,7 @@ This plugin targets the plugin interface from [openclaw/openclaw#45318](https://
 
 ```bash
 git clone <this-repo-url>
-cd openclaw-app-server
+cd openclaw-codex-app-server
 ```
 
 ### 1. Check out OpenClaw with the plugin interface
@@ -45,10 +45,10 @@ That makes the local `openclaw` package available to this plugin before a publis
 
 ### 3. Install the plugin from your local checkout
 
-From this repository:
+From the openclaw repository:
 
 ```bash
-pnpm openclaw plugins install --link "$PWD"
+pnpm openclaw plugins install --link "/absolute/path/to/openclaw-codex-app-server"
 ```
 
 ### 4. Start OpenClaw
