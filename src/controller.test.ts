@@ -585,8 +585,8 @@ describe("Discord controller flows", () => {
     expect(reply.text).toContain("Choose a name style");
     const buttons = (reply.channelData as any)?.telegram?.buttons;
     expect(buttons).toHaveLength(2);
-    expect(buttons[0][0].text).toBe("Thread Name (openclaw)");
-    expect(buttons[1][0].text).toBe("Thread Name");
+    expect(buttons[0][0].text).toBe("Discord Thread (openclaw)");
+    expect(buttons[1][0].text).toBe("Discord Thread");
     expect(String(buttons[0][0].callback_data)).toMatch(/^codexapp:/);
     expect(String(buttons[0][0].callback_data).length).toBeLessThan(64);
   });

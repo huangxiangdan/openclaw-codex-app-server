@@ -1347,13 +1347,13 @@ export class CodexPluginController {
     const callbacks: Array<{ text: string; style: "thread-project" | "thread" }> = [];
     if (threadProjectName) {
       callbacks.push({
-        text: `Thread Name (${getProjectName(threadState?.cwd?.trim() || binding.workspaceDir) ?? "project"})`,
+        text: threadProjectName,
         style: "thread-project",
       });
     }
     if (threadName && threadName !== threadProjectName) {
       callbacks.push({
-        text: "Thread Name",
+        text: threadName,
         style: "thread",
       });
     }
