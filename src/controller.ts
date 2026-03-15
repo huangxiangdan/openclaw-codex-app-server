@@ -475,6 +475,17 @@ function truncateDiscordLabel(text: string, maxChars = 80): string {
   return `${trimmed.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
 }
 
+function summarizeTextForLog(text: string, maxChars = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "<empty>";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+}
+
 export class CodexPluginController {
   private readonly settings;
   private readonly client;
@@ -506,6 +517,16 @@ export class CodexPluginController {
     }
     await this.store.load();
     this.started = true;
+  }
+
+  private formatConversationForLog(conversation: ConversationTarget): string {
+    return [
+      `channel=${conversation.channel}`,
+      `account=${conversation.accountId ?? "<none>"}`,
+      `conversation=${conversation.conversationId}`,
+      `parent=${conversation.parentConversationId ?? "<none>"}`,
+      `thread=${conversation.threadId == null ? "<none>" : String(conversation.threadId)}`,
+    ].join(" ");
   }
 
   async handleInboundClaim(event: {
@@ -575,6 +596,9 @@ export class CodexPluginController {
       if (!resolvedBinding) {
         return { handled: false };
       }
+      this.api.logger.debug?.(
+        `codex inbound claim starting turn ${this.formatConversationForLog(conversation)} workspace=${resolvedBinding.workspaceDir} thread=${resolvedBinding.threadId} prompt="${summarizeTextForLog(event.content)}"`,
+      );
       await this.startTurn({
         conversation,
         binding: resolvedBinding,
@@ -582,6 +606,9 @@ export class CodexPluginController {
         prompt: event.content,
         reason: "inbound",
       });
+      this.api.logger.debug?.(
+        `codex inbound claim turn accepted ${this.formatConversationForLog(conversation)}`,
+      );
       return { handled: true };
     } catch (error) {
       const detail =
@@ -1457,16 +1484,41 @@ export class CodexPluginController {
   }): Promise<void> {
     const key = buildConversationKey(params.conversation);
     const existing = this.activeRuns.get(key);
+    this.api.logger.debug?.(
+      `codex turn request reason=${params.reason} ${this.formatConversationForLog(params.conversation)} workspace=${params.workspaceDir} existing=${existing ? existing.mode : "none"} prompt="${summarizeTextForLog(params.prompt)}"`,
+    );
     if (existing) {
       if (existing.mode === "plan" && (params.collaborationMode?.mode ?? "default") !== "plan") {
+        this.api.logger.debug?.(
+          `codex turn request replacing active plan run ${this.formatConversationForLog(params.conversation)}`,
+        );
         this.activeRuns.delete(key);
         await existing.handle.interrupt().catch(() => undefined);
       } else {
-        await existing.handle.queueMessage(params.prompt);
-        return;
+        try {
+          const handled = await existing.handle.queueMessage(params.prompt);
+          if (handled) {
+            this.api.logger.debug?.(
+              `codex turn request queued onto active run ${this.formatConversationForLog(params.conversation)} mode=${existing.mode}`,
+            );
+            return;
+          }
+          this.api.logger.warn(
+            `codex turn request reached an active run but was not accepted; restarting ${this.formatConversationForLog(params.conversation)} mode=${existing.mode}`,
+          );
+        } catch (error) {
+          this.api.logger.warn(
+            `codex turn request active run enqueue failed; restarting ${this.formatConversationForLog(params.conversation)} mode=${existing.mode}: ${String(error)}`,
+          );
+        }
+        this.activeRuns.delete(key);
+        await existing.handle.interrupt().catch(() => undefined);
       }
     }
     const typing = await this.startTypingLease(params.conversation);
+    this.api.logger.debug?.(
+      `codex turn starting app-server run ${this.formatConversationForLog(params.conversation)} typing=${typing ? "yes" : "no"} session=${params.binding?.sessionKey ?? "<none>"} existingThread=${params.binding?.threadId ?? "<none>"} mode=${params.collaborationMode?.mode ?? "default"}`,
+    );
     const run = this.client.startTurn({
       sessionKey: params.binding?.sessionKey,
       workspaceDir: params.workspaceDir,
@@ -1476,12 +1528,21 @@ export class CodexPluginController {
       model: this.settings.defaultModel,
       collaborationMode: params.collaborationMode,
       onPendingInput: async (state) => {
+        this.api.logger.debug?.(
+          `codex turn pending input ${state ? "received" : "cleared"} ${this.formatConversationForLog(params.conversation)} questionnaire=${state?.questionnaire ? "yes" : "no"}`,
+        );
         await this.handlePendingInputState(params.conversation, params.workspaceDir, state, run);
       },
       onInterrupted: async () => {
+        this.api.logger.debug?.(
+          `codex turn interrupted ${this.formatConversationForLog(params.conversation)}`,
+        );
         await this.sendText(params.conversation, "Codex stopped.");
       },
     });
+    this.api.logger.debug?.(
+      `codex turn run handle created ${this.formatConversationForLog(params.conversation)}`,
+    );
     this.activeRuns.set(key, {
       conversation: params.conversation,
       workspaceDir: params.workspaceDir,
@@ -1518,10 +1579,16 @@ export class CodexPluginController {
             });
           }
         }
+        this.api.logger.debug?.(
+          `codex turn completed ${this.formatConversationForLog(params.conversation)} thread=${threadId ?? "<none>"} aborted=${result.aborted ? "yes" : "no"} text=${result.text ? "yes" : "no"} plan=${result.planArtifact ? "yes" : "no"}`,
+        );
         await this.sendText(params.conversation, formatTurnCompletion(result));
       })
       .catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error);
+        this.api.logger.warn(
+          `codex turn failed ${this.formatConversationForLog(params.conversation)}: ${message}`,
+        );
         await this.sendText(params.conversation, `Codex failed: ${message}`);
       })
       .finally(async () => {
@@ -1531,6 +1598,9 @@ export class CodexPluginController {
         if (pending) {
           await this.store.removePendingRequest(pending.requestId);
         }
+        this.api.logger.debug?.(
+          `codex turn cleaned up ${this.formatConversationForLog(params.conversation)}`,
+        );
       });
   }
 
@@ -2977,6 +3047,9 @@ export class CodexPluginController {
     if (!text && !hasMedia) {
       return false;
     }
+    this.api.logger.debug?.(
+      `codex outbound send start ${this.formatConversationForLog(conversation)} textChars=${text.length} media=${hasMedia ? "yes" : "no"} buttons=${payload.buttons?.length ?? 0} preview="${summarizeTextForLog(text, 80)}"`,
+    );
     if (isTelegramChannel(conversation.channel)) {
       const mediaLocalRoots = this.resolveReplyMediaLocalRoots(payload.mediaUrl);
       const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
@@ -3015,6 +3088,9 @@ export class CodexPluginController {
             },
           );
         }
+        this.api.logger.debug?.(
+          `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=telegram chunks=${Math.max(chunks.length, 1)} media=${hasMedia ? "yes" : "no"}`,
+        );
         return true;
       }
       const textChunks = chunks.length > 0 ? chunks : [text];
@@ -3033,6 +3109,9 @@ export class CodexPluginController {
           },
         );
       }
+      this.api.logger.debug?.(
+        `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=telegram chunks=${textChunks.length} media=no`,
+      );
       return true;
     }
     if (isDiscordChannel(conversation.channel)) {
@@ -3085,6 +3164,9 @@ export class CodexPluginController {
             accountId: conversation.accountId,
           },
         );
+        this.api.logger.debug?.(
+          `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=discord chunks=${chunks.length + 1 + (hasMedia ? 1 : 0)} media=${hasMedia ? "yes" : "no"} buttons=${payload.buttons.length}`,
+        );
         return true;
       }
       const textChunks = chunks.length > 0 ? chunks : [text];
@@ -3108,6 +3190,9 @@ export class CodexPluginController {
           accountId: conversation.accountId,
         });
       }
+      this.api.logger.debug?.(
+        `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=discord chunks=${textChunks.length + (hasMedia ? 1 : 0)} media=${hasMedia ? "yes" : "no"}`,
+      );
       return hasMedia || textChunks.length > 0;
     }
     return false;

@@ -193,6 +193,17 @@ function collectText(value: unknown): string[] {
   return out;
 }
 
+function summarizeTextForLog(text: string, maxChars = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "<empty>";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
+}
+
 function findFirstNestedString(
   value: unknown,
   keys: readonly string[],
@@ -2564,6 +2575,7 @@ export class CodexAppServerClient {
     let threadId = params.existingThreadId?.trim() || "";
     let turnId = "";
     let assistantText = "";
+    let sawAssistantOutput = false;
     let assistantItemId = "";
     let planExplanation = "";
     let planSteps: Array<{ step: string; status: "pending" | "inProgress" | "completed" }> = [];
@@ -2637,6 +2649,13 @@ export class CodexAppServerClient {
           }
         }
         const assistantNotification = extractAssistantNotificationText(methodLower, notificationParams);
+        const assistantPreview = assistantNotification.text.trim();
+        if (assistantPreview && !sawAssistantOutput) {
+          sawAssistantOutput = true;
+          this.logger.debug(
+            `codex turn first assistant output run=${params.runId} thread=${threadId || "<pending>"} turn=${turnId || "<pending>"} method=${methodLower} chars=${assistantPreview.length} preview="${summarizeTextForLog(assistantPreview, 80)}"`,
+          );
+        }
         if (
           assistantNotification.itemId &&
           assistantItemId &&
@@ -2663,6 +2682,9 @@ export class CodexAppServerClient {
           methodLower === "turn/failed" ||
           methodLower === "turn/cancelled"
         ) {
+          this.logger.debug(
+            `codex turn terminal notification run=${params.runId} thread=${threadId || "<pending>"} turn=${turnId || "<pending>"} method=${methodLower}`,
+          );
           completeTurn?.();
         }
       });
@@ -2742,8 +2764,15 @@ export class CodexAppServerClient {
 
     const handleResult = (async () => {
       try {
+        this.logger.debug(
+          `codex turn connect start run=${params.runId} existingThread=${threadId || "<none>"} workspace=${params.workspaceDir} mode=${params.collaborationMode?.mode ?? "default"} prompt="${summarizeTextForLog(params.prompt)}"`,
+        );
         await client.connect();
+        this.logger.debug(`codex turn transport connected run=${params.runId}`);
         await initializeClient({ client, settings: this.settings, sessionKey: params.sessionKey });
+        this.logger.debug(
+          `codex turn client initialized run=${params.runId} session=${params.sessionKey ?? "<none>"}`,
+        );
         if (!threadId) {
           const created = await requestWithFallbacks({
             client,
@@ -2759,6 +2788,7 @@ export class CodexAppServerClient {
           if (!threadId) {
             throw new Error("Codex App Server did not return a thread id.");
           }
+          this.logger.debug(`codex turn thread created run=${params.runId} thread=${threadId}`);
         } else {
           await requestWithFallbacks({
             client,
@@ -2766,6 +2796,7 @@ export class CodexAppServerClient {
             payloads: [{ threadId }, { thread_id: threadId }],
             timeoutMs: this.settings.requestTimeoutMs,
           }).catch(() => undefined);
+          this.logger.debug(`codex turn thread resumed run=${params.runId} thread=${threadId}`);
         }
         const started = await requestWithFallbacks({
           client,
@@ -2781,11 +2812,17 @@ export class CodexAppServerClient {
         const startedIds = extractIds(started);
         threadId ||= startedIds.threadId ?? "";
         turnId ||= startedIds.runId ?? "";
+        this.logger.debug(
+          `codex turn started run=${params.runId} thread=${threadId || "<none>"} turn=${turnId || "<none>"}`,
+        );
         await completion;
         if (completed && !interrupted) {
           await new Promise<void>((resolve) => setTimeout(resolve, TRAILING_NOTIFICATION_SETTLE_MS));
           await notificationQueue;
         }
+        this.logger.debug(
+          `codex turn completion settled run=${params.runId} thread=${threadId || "<none>"} turn=${turnId || "<none>"} interrupted=${interrupted ? "yes" : "no"} assistantChars=${assistantText.length}`,
+        );
         return {
           threadId,
           text:
@@ -2802,6 +2839,11 @@ export class CodexAppServerClient {
           aborted: interrupted,
           usage: latestContextUsage,
         } satisfies TurnResult;
+      } catch (error) {
+        this.logger.warn(
+          `codex turn execution failed run=${params.runId} thread=${threadId || "<none>"} turn=${turnId || "<none>"}: ${String(error)}`,
+        );
+        throw error;
       } finally {
         if (threadId) {
           await requestWithFallbacks({
@@ -2812,6 +2854,9 @@ export class CodexAppServerClient {
           }).catch(() => undefined);
         }
         await client.close().catch(() => undefined);
+        this.logger.debug(
+          `codex turn transport closed run=${params.runId} thread=${threadId || "<none>"} turn=${turnId || "<none>"}`,
+        );
       }
     })();
 
@@ -2843,9 +2888,13 @@ export class CodexAppServerClient {
           } else {
             await pendingInputCoordinator.settleCurrent({ text: parsed.text });
           }
+          this.logger.debug(
+            `codex turn queued interactive response run=${params.runId} thread=${threadId || "<none>"} turn=${turnId || "<none>"} prompt="${summarizeTextForLog(trimmed, 80)}"`,
+          );
           return true;
         }
         if (!threadId) {
+          this.logger.debug(`codex turn queue rejected before thread assignment run=${params.runId}`);
           return false;
         }
         await requestWithFallbacks({
@@ -2857,6 +2906,9 @@ export class CodexAppServerClient {
           ],
           timeoutMs: this.settings.requestTimeoutMs,
         });
+        this.logger.debug(
+          `codex turn queued steer message run=${params.runId} thread=${threadId} turn=${turnId || "<none>"} prompt="${summarizeTextForLog(trimmed, 80)}"`,
+        );
         return true;
       },
       submitPendingInput: async (actionIndex) => {
@@ -2884,9 +2936,13 @@ export class CodexAppServerClient {
       },
       interrupt: async () => {
         if (!threadId) {
+          this.logger.debug(`codex turn interrupt ignored before thread assignment run=${params.runId}`);
           return;
         }
         interrupted = true;
+        this.logger.debug(
+          `codex turn interrupt requested run=${params.runId} thread=${threadId} turn=${turnId || "<none>"}`,
+        );
         await params.onInterrupted?.();
         await requestWithFallbacks({
           client,
