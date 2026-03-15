@@ -1,8 +1,10 @@
 {
-  "name": "@pwrdrvr/openclaw-codex-app-server",
-  "version": "0.0.0-development",
+  "name": "openclaw-codex-app-server",
+  "version": "2026.3.13",
   "description": "OpenClaw plugin for Codex App Server conversations",
+  "author": "PwrDrvr LLC",
   "license": "MIT",
+  "packageManager": "pnpm@10.29.3",
   "type": "module",
   "openclaw": {
     "extensions": [
@@ -11,7 +13,9 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pack:smoke": "node ./scripts/pack-smoke.mjs",
+    "release:apply-version": "node ./scripts/apply-release-version.mjs"
   },
   "peerDependencies": {
     "openclaw": "*"
@@ -21,7 +25,6 @@
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
-    "openclaw": "file:/Users/huntharo/.codex/worktrees/cb00/openclaw",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }
