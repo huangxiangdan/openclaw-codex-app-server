@@ -442,6 +442,11 @@ function buildResumeTopicName(params: { title?: string; projectKey?: string; thr
   return projectName ? `${threadName} (${projectName})` : threadName;
 }
 
+function buildThreadOnlyName(params: { title?: string; threadId: string }): string | undefined {
+  const threadName = params.title?.trim() || params.threadId.trim();
+  return threadName || undefined;
+}
+
 function truncateDiscordLabel(text: string, maxChars = 80): string {
   const trimmed = text.trim();
   if (trimmed.length <= maxChars) {
@@ -1300,7 +1305,8 @@ export class CodexPluginController {
     }
     const parsed = parseRenameArgs(args);
     if (!parsed?.name) {
-      return { text: "Usage: /codex_rename [--sync] <new name>" };
+      const picker = await this.buildRenameStylePicker(conversation, binding, Boolean(parsed?.syncTopic));
+      return buildReplyWithButtons(picker.text, picker.buttons);
     }
     await this.client.setThreadName({
       sessionKey: binding.sessionKey,
@@ -1316,6 +1322,107 @@ export class CodexPluginController {
       updatedAt: Date.now(),
     });
     return { text: `Renamed the Codex thread to "${parsed.name}".` };
+  }
+
+  private async buildRenameStylePicker(
+    conversation: ConversationTarget,
+    binding: StoredBinding,
+    syncTopic: boolean,
+  ): Promise<{ text: string; buttons: PluginInteractiveButtons }> {
+    const threadState = await this.client
+      .readThreadState({
+        sessionKey: binding.sessionKey,
+        threadId: binding.threadId,
+      })
+      .catch(() => undefined);
+    const threadName = buildThreadOnlyName({
+      title: threadState?.threadName || binding.threadTitle,
+      threadId: binding.threadId,
+    });
+    const threadProjectName = buildResumeTopicName({
+      title: threadState?.threadName || binding.threadTitle,
+      projectKey: threadState?.cwd?.trim() || binding.workspaceDir,
+      threadId: binding.threadId,
+    });
+    const callbacks: Array<{ text: string; style: "thread-project" | "thread" }> = [];
+    if (threadProjectName) {
+      callbacks.push({
+        text: `Thread Name (${getProjectName(threadState?.cwd?.trim() || binding.workspaceDir) ?? "project"})`,
+        style: "thread-project",
+      });
+    }
+    if (threadName && threadName !== threadProjectName) {
+      callbacks.push({
+        text: "Thread Name",
+        style: "thread",
+      });
+    }
+    const buttons: PluginInteractiveButtons = [];
+    for (const entry of callbacks) {
+      const callback = await this.store.putCallback({
+        kind: "rename-thread",
+        conversation,
+        style: entry.style,
+        syncTopic,
+      });
+      buttons.push([
+        {
+          text: entry.text,
+          callback_data: `${INTERACTIVE_NAMESPACE}:${callback.token}`,
+        },
+      ]);
+    }
+    if (buttons.length === 0) {
+      return { text: "Usage: /codex_rename [--sync] <new name>", buttons: [] };
+    }
+    return {
+      text: syncTopic
+        ? "Choose a name style for the Codex thread and this conversation."
+        : "Choose a name style for the Codex thread.",
+      buttons,
+    };
+  }
+
+  private async applyRenameStyle(
+    conversation: ConversationTarget,
+    binding: StoredBinding,
+    style: "thread-project" | "thread",
+    syncTopic: boolean,
+  ): Promise<string> {
+    const threadState = await this.client
+      .readThreadState({
+        sessionKey: binding.sessionKey,
+        threadId: binding.threadId,
+      })
+      .catch(() => undefined);
+    const name =
+      style === "thread-project"
+        ? buildResumeTopicName({
+            title: threadState?.threadName || binding.threadTitle,
+            projectKey: threadState?.cwd?.trim() || binding.workspaceDir,
+            threadId: binding.threadId,
+          })
+        : buildThreadOnlyName({
+            title: threadState?.threadName || binding.threadTitle,
+            threadId: binding.threadId,
+          });
+    if (!name) {
+      throw new Error("Unable to derive a Codex thread name.");
+    }
+    await this.client.setThreadName({
+      sessionKey: binding.sessionKey,
+      threadId: binding.threadId,
+      name,
+    });
+    if (syncTopic) {
+      await this.renameConversationIfSupported(conversation, name);
+    }
+    await this.store.upsertBinding({
+      ...binding,
+      threadTitle: name,
+      updatedAt: Date.now(),
+    });
+    return name;
   }
 
   private async startTurn(params: {
@@ -2462,6 +2569,29 @@ export class CodexPluginController {
       await responders.clear().catch(() => undefined);
       await this.store.removeCallback(callback.token);
       await responders.reply(callback.text);
+      return;
+    }
+    if (callback.kind === "rename-thread") {
+      await responders.clear().catch(() => undefined);
+      const binding = this.store.getBinding(callback.conversation);
+      await this.store.removeCallback(callback.token);
+      if (!binding) {
+        await responders.reply("Bind this conversation to a Codex thread before renaming it.");
+        return;
+      }
+      try {
+        const name = await this.applyRenameStyle(
+          responders.conversation,
+          binding,
+          callback.style,
+          callback.syncTopic,
+        );
+        await responders.reply(`Renamed the Codex thread to "${name}".`);
+      } catch (error) {
+        await responders.reply(
+          error instanceof Error ? error.message : "Unable to derive a Codex thread name.",
+        );
+      }
       return;
     }
     const binding = this.store.getBinding(callback.conversation);

@@ -556,6 +556,41 @@ describe("Discord controller flows", () => {
     expect(reply).toEqual({ text: 'Renamed the Codex thread to "New Topic Name".' });
   });
 
+  it("offers compact rename style buttons for codex_rename --sync without a name", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      threadTitle: "Discord Thread",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "codex_rename",
+      buildTelegramCommandContext({
+        args: "--sync",
+        commandBody: "/codex_rename --sync",
+        messageThreadId: 456,
+        getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
+      }),
+    );
+
+    expect(reply.text).toContain("Choose a name style");
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0][0].text).toBe("Thread Name (openclaw)");
+    expect(buttons[1][0].text).toBe("Thread Name");
+    expect(String(buttons[0][0].callback_data)).toMatch(/^codexapp:/);
+    expect(String(buttons[0][0].callback_data).length).toBeLessThan(64);
+  });
+
   it("requests approved conversation binding when binding a Discord thread", async () => {
     const { controller } = await createControllerHarness();
     const requestConversationBinding = vi.fn(async () => ({ status: "bound" as const }));

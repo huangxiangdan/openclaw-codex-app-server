@@ -57,6 +57,14 @@ type PutCallbackInput =
       ttlMs?: number;
     }
   | {
+      kind: "rename-thread";
+      conversation: ConversationTarget;
+      style: "thread-project" | "thread";
+      syncTopic: boolean;
+      token?: string;
+      ttlMs?: number;
+    }
+  | {
       kind: "set-model";
       conversation: ConversationTarget;
       model: string;
@@ -278,22 +286,32 @@ export class PluginStateStore {
               createdAt: now,
               expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
               }
-            : callback.kind === "run-prompt"
-              ? {
-                  kind: "run-prompt",
-                  conversation: callback.conversation,
-                  prompt: callback.prompt,
+              : callback.kind === "run-prompt"
+                ? {
+                    kind: "run-prompt",
+                    conversation: callback.conversation,
+                    prompt: callback.prompt,
                   workspaceDir: callback.workspaceDir,
                   collaborationMode: callback.collaborationMode,
                   token: callback.token ?? this.createCallbackToken(),
                   createdAt: now,
                   expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
                 }
+              : callback.kind === "rename-thread"
+                ? {
+                    kind: "rename-thread",
+                    conversation: callback.conversation,
+                    style: callback.style,
+                    syncTopic: callback.syncTopic,
+                    token: callback.token ?? this.createCallbackToken(),
+                    createdAt: now,
+                    expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
+                  }
               : callback.kind === "set-model"
                 ? {
-                  kind: "set-model",
-                  conversation: callback.conversation,
-                  model: callback.model,
+                    kind: "set-model",
+                    conversation: callback.conversation,
+                    model: callback.model,
                   token: callback.token ?? this.createCallbackToken(),
                   createdAt: now,
                   expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),

@@ -346,6 +346,15 @@ export type CallbackAction =
       text: string;
       createdAt: number;
       expiresAt: number;
+    }
+  | {
+      token: string;
+      kind: "rename-thread";
+      conversation: ConversationRef;
+      style: "thread-project" | "thread";
+      syncTopic: boolean;
+      createdAt: number;
+      expiresAt: number;
     };
 
 export type StoreSnapshot = {
