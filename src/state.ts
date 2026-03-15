@@ -170,6 +170,9 @@ export class PluginStateStore {
     this.snapshot.bindings = this.snapshot.bindings.filter(
       (entry) => toConversationKey(entry.conversation) !== key,
     );
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
     this.snapshot.pendingRequests = this.snapshot.pendingRequests.filter(
       (entry) => toConversationKey(entry.conversation) !== key,
     );

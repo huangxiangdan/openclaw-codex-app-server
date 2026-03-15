@@ -743,7 +743,7 @@ export class CodexPluginController {
         ? await bindingApi.getCurrentConversationBinding()
         : null;
     const binding =
-      conversation
+      conversation && currentBinding
         ? this.store.getBinding(conversation) ??
           (await this.hydrateApprovedBinding(conversation))
         : null;

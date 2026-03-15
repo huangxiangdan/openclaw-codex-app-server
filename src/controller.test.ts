@@ -470,7 +470,7 @@ describe("Discord controller flows", () => {
     );
   });
 
-  it("shows codex_status as active when only the local restored binding exists", async () => {
+  it("shows codex_status as none when no core binding exists", async () => {
     const { controller } = await createControllerHarness();
     await (controller as any).store.upsertBinding({
       conversation: {
@@ -495,9 +495,40 @@ describe("Discord controller flows", () => {
       }),
     );
 
-    expect(reply.text).toContain("Binding: active");
-    expect(reply.text).toContain("Project folder: /repo/discrawl");
-    expect(reply.text).not.toContain("Binding: none");
+    expect(reply.text).toContain("Binding: none");
+    expect(reply.text).not.toContain("Project folder: /repo/discrawl");
+    expect(reply.text).not.toContain("Session: session-1");
+  });
+
+  it("does not hydrate a denied pending bind into codex_status", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertPendingBind({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      threadId: "thread-1",
+      workspaceDir: "/repo/discrawl",
+      threadTitle: "Summarize tools used",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "codex_status",
+      buildTelegramCommandContext({
+        commandBody: "/codex_status",
+        getCurrentConversationBinding: vi.fn(async () => null),
+      }),
+    );
+
+    expect(reply.text).toContain("Binding: none");
+    expect(reply.text).not.toContain("Project folder: /repo/discrawl");
+    expect((controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    })).toBeNull();
   });
 
   it("shows plan mode on in codex_status when the bound conversation has an active plan run", async () => {

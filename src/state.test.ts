@@ -197,4 +197,32 @@ describe("state store", () => {
       }),
     ).toBeNull();
   });
+
+  it("clears a pending bind when the conversation is explicitly removed", async () => {
+    const store = await makeStore();
+    await store.upsertPendingBind({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      threadId: "thread-1",
+      workspaceDir: "/tmp/work",
+      updatedAt: Date.now(),
+    });
+
+    await store.removeBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+
+    expect(
+      store.getPendingBind({
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      }),
+    ).toBeNull();
+  });
 });
