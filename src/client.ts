@@ -856,6 +856,11 @@ async function requestWithFallbacks(params: {
   payloads: unknown[];
   timeoutMs: number;
 }): Promise<unknown> {
+  if (params.payloads.length === 0) {
+    throw new Error(
+      `codex app server request skipped: no payloads for ${params.methods.join(", ") || "<none>"}`,
+    );
+  }
   let lastError: unknown;
   for (const method of params.methods) {
     for (const payload of params.payloads) {
@@ -907,30 +912,27 @@ function buildThreadResumePayloads(params: {
   if (params.serviceTier !== undefined) {
     base.serviceTier = params.serviceTier;
   }
-  return [base, { ...base, thread_id: params.threadId, threadId: undefined }].map((entry) => {
-    const next = { ...entry };
-    if (next.threadId === undefined) {
-      delete next.threadId;
-    }
-    return next;
-  });
+  return [base];
 }
 
-function buildTurnInput(prompt: string): unknown[] {
-  return [[{ type: "text", text: prompt }]];
+function buildTurnInput(prompt: string): Array<Record<string, unknown>> {
+  return [{ type: "text", text: prompt }];
 }
 
-function buildCollaborationModeVariants(
+function buildCollaborationModePayloads(
   collaborationMode: CollaborationMode,
-): Array<{ camel?: Record<string, unknown>; snake?: Record<string, unknown> }> {
+  fallbackModel?: string,
+): Array<{ camel: Record<string, unknown>; snake: Record<string, unknown> }> {
+  const normalizedModel = collaborationMode.settings?.model?.trim() || fallbackModel?.trim() || "";
+  if (!normalizedModel) {
+    return [];
+  }
   const hasDeveloperInstructions = Object.hasOwn(
     collaborationMode.settings ?? {},
     "developerInstructions",
   );
-  const normalizedSettings: Record<string, unknown> = {
-    ...(collaborationMode.settings?.model
-      ? { model: collaborationMode.settings.model }
-      : {}),
+  const camelSettings: Record<string, unknown> = {
+    model: normalizedModel,
     ...(collaborationMode.settings?.reasoningEffort
       ? { reasoningEffort: collaborationMode.settings.reasoningEffort }
       : {}),
@@ -945,40 +947,28 @@ function buildCollaborationModeVariants(
       ? { developerInstructions: null }
       : {}),
   };
-  const variants: Array<{ camel?: Record<string, unknown>; snake?: Record<string, unknown> }> =
-    [];
-  if (Object.keys(normalizedSettings).length > 0) {
-    variants.push({
+  const snakeSettings: Record<string, unknown> = {
+    model: normalizedModel,
+    ...(typeof camelSettings.reasoningEffort === "string"
+      ? { reasoning_effort: camelSettings.reasoningEffort }
+      : {}),
+    ...(typeof camelSettings.developerInstructions === "string" ||
+    camelSettings.developerInstructions == null
+      ? { developer_instructions: camelSettings.developerInstructions }
+      : {}),
+  };
+  return [
+    {
       camel: {
         mode: collaborationMode.mode,
-        settings: normalizedSettings,
+        settings: camelSettings,
       },
       snake: {
         mode: collaborationMode.mode,
-        settings: {
-          ...(typeof normalizedSettings.model === "string"
-            ? { model: normalizedSettings.model }
-            : {}),
-          ...(typeof normalizedSettings.reasoningEffort === "string"
-            ? { reasoning_effort: normalizedSettings.reasoningEffort }
-            : {}),
-          ...(typeof normalizedSettings.developerInstructions === "string" ||
-          normalizedSettings.developerInstructions == null
-            ? { developer_instructions: normalizedSettings.developerInstructions }
-            : {}),
-        },
+        settings: snakeSettings,
       },
-    });
-  }
-  variants.push({
-    camel: {
-      mode: collaborationMode.mode,
     },
-    snake: {
-      mode: collaborationMode.mode,
-    },
-  });
-  return variants;
+  ];
 }
 
 function buildTurnStartPayloads(params: {
@@ -987,39 +977,55 @@ function buildTurnStartPayloads(params: {
   model?: string;
   collaborationMode?: CollaborationMode;
 }): unknown[] {
-  const payloads = buildTurnInput(params.prompt).flatMap((input) => {
-    const camel: Record<string, unknown> = {
+  const base: Record<string, unknown> = {
+    threadId: params.threadId,
+    input: buildTurnInput(params.prompt),
+  };
+  if (params.model?.trim()) {
+    base.model = params.model.trim();
+  }
+  if (!params.collaborationMode) {
+    return [base];
+  }
+  const collaborationPayloads = buildCollaborationModePayloads(
+    params.collaborationMode,
+    params.model,
+  ).flatMap((variant) => [
+    {
+      ...base,
+      collaborationMode: variant.camel,
+    },
+    {
+      ...base,
+      collaboration_mode: variant.snake,
+    },
+  ]);
+  return [...collaborationPayloads, base];
+}
+
+function buildTurnSteerPayloads(params: {
+  threadId: string;
+  turnId: string;
+  text: string;
+}): Array<Record<string, unknown>> {
+  const trimmed = params.text.trim();
+  if (!trimmed) {
+    return [];
+  }
+  return [
+    {
       threadId: params.threadId,
-      input,
-    };
-    const snake: Record<string, unknown> = {
-      thread_id: params.threadId,
-      input,
-    };
-    if (params.model?.trim()) {
-      camel.model = params.model.trim();
-      snake.model = params.model.trim();
-    }
-    if (!params.collaborationMode) {
-      return [camel, snake];
-    }
-    const collaborationVariants = buildCollaborationModeVariants(params.collaborationMode);
-    return [
-      ...collaborationVariants.flatMap((variant) => [
-        {
-          ...camel,
-          ...(variant.camel ? { collaborationMode: variant.camel } : {}),
-        },
-        {
-          ...snake,
-          ...(variant.snake ? { collaboration_mode: variant.snake } : {}),
-        },
-      ]),
-      camel,
-      snake,
-    ];
-  });
-  return payloads;
+      expectedTurnId: params.turnId,
+      input: buildTurnInput(trimmed),
+    },
+  ];
+}
+
+function buildTurnInterruptPayloads(params: {
+  threadId: string;
+  turnId: string;
+}): Array<Record<string, unknown>> {
+  return [{ threadId: params.threadId, turnId: params.turnId }];
 }
 
 function normalizeEpochTimestamp(value: number | undefined): number | undefined {
@@ -1251,10 +1257,7 @@ async function readFileChangePathsWithClient(params: {
   const result = await requestWithFallbacks({
     client: params.client,
     methods: ["thread/read"],
-    payloads: [
-      { threadId: params.threadId, includeTurns: true },
-      { thread_id: params.threadId, include_turns: true },
-    ],
+    payloads: [{ threadId: params.threadId, includeTurns: true }],
     timeoutMs: params.settings.requestTimeoutMs,
   });
   return extractFileChangePathsFromReadResult(result, params.itemId, params.workspaceDir);
@@ -2177,7 +2180,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/unsubscribe"],
-            payloads: [{ threadId: params.threadId }, { thread_id: params.threadId }],
+            payloads: [{ threadId: params.threadId }],
             timeoutMs: settings.requestTimeoutMs,
           }).catch(() => undefined);
         }
@@ -2196,10 +2199,7 @@ export class CodexAppServerClient {
         await requestWithFallbacks({
           client,
           methods: ["thread/name/set"],
-          payloads: [
-            { threadId: params.threadId, name: params.name },
-            { thread_id: params.threadId, name: params.name },
-          ],
+          payloads: [{ threadId: params.threadId, name: params.name }],
           timeoutMs: settings.requestTimeoutMs,
         });
       },
@@ -2231,7 +2231,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/unsubscribe"],
-            payloads: [{ threadId: params.threadId }, { thread_id: params.threadId }],
+            payloads: [{ threadId: params.threadId }],
             timeoutMs: settings.requestTimeoutMs,
           }).catch(() => undefined);
         }
@@ -2262,7 +2262,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/unsubscribe"],
-            payloads: [{ threadId: params.threadId }, { thread_id: params.threadId }],
+            payloads: [{ threadId: params.threadId }],
             timeoutMs: settings.requestTimeoutMs,
           }).catch(() => undefined);
         }
@@ -2367,7 +2367,7 @@ export class CodexAppServerClient {
       await requestWithFallbacks({
         client,
         methods: ["thread/compact/start"],
-        payloads: [{ threadId: params.threadId }, { thread_id: params.threadId }],
+        payloads: [{ threadId: params.threadId }],
         timeoutMs: this.settings.requestTimeoutMs,
       });
       await completion;
@@ -2379,7 +2379,7 @@ export class CodexAppServerClient {
       await requestWithFallbacks({
         client,
         methods: ["thread/unsubscribe"],
-        payloads: [{ threadId: params.threadId }, { thread_id: params.threadId }],
+        payloads: [{ threadId: params.threadId }],
         timeoutMs: this.settings.requestTimeoutMs,
       }).catch(() => undefined);
       await client.close().catch(() => undefined);
@@ -2396,10 +2396,7 @@ export class CodexAppServerClient {
         const result = await requestWithFallbacks({
           client,
           methods: ["thread/read"],
-          payloads: [
-            { threadId: params.threadId, includeTurns: true },
-            { thread_id: params.threadId, include_turns: true },
-          ],
+          payloads: [{ threadId: params.threadId, includeTurns: true }],
           timeoutMs: settings.requestTimeoutMs,
         });
         return extractThreadReplayFromReadResult(result);
@@ -2453,16 +2450,13 @@ export class CodexAppServerClient {
         await requestWithFallbacks({
           client,
           methods: ["thread/resume"],
-          payloads: [{ threadId: reviewThreadId }, { thread_id: reviewThreadId }],
+          payloads: [{ threadId: reviewThreadId }],
           timeoutMs: this.settings.requestTimeoutMs,
         }).catch(() => undefined);
         const result = await requestWithFallbacks({
           client,
           methods: ["review/start"],
-          payloads: [
-            { threadId: reviewThreadId, target: params.target, delivery: "inline" },
-            { thread_id: reviewThreadId, target: params.target, delivery: "inline" },
-          ],
+          payloads: [{ threadId: reviewThreadId, target: params.target, delivery: "inline" }],
           timeoutMs: this.settings.requestTimeoutMs,
         });
         const resultRecord = asRecord(result);
@@ -2486,7 +2480,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/unsubscribe"],
-            payloads: [{ threadId: reviewThreadId }, { thread_id: reviewThreadId }],
+            payloads: [{ threadId: reviewThreadId }],
             timeoutMs: this.settings.requestTimeoutMs,
           }).catch(() => undefined);
         }
@@ -2580,16 +2574,21 @@ export class CodexAppServerClient {
         methodLower.includes("requestapproval") && typeof responseRecord?.steerText === "string"
           ? responseRecord.steerText.trim()
           : "";
-      if (steerText && reviewThreadId) {
+      if (steerText && reviewThreadId && turnId) {
         await requestWithFallbacks({
           client,
           methods: [...TURN_STEER_METHODS],
-          payloads: [
-            { threadId: reviewThreadId, turnId: turnId || undefined, text: steerText },
-            { thread_id: reviewThreadId, turn_id: turnId || undefined, text: steerText },
-          ],
+          payloads: buildTurnSteerPayloads({
+            threadId: reviewThreadId,
+            turnId,
+            text: steerText,
+          }),
           timeoutMs: this.settings.requestTimeoutMs,
         });
+      } else if (steerText && reviewThreadId) {
+        this.logger.warn(
+          `codex review interactive steer dropped without active turn reviewThread=${reviewThreadId}`,
+        );
       }
       return mappedResponse;
     });
@@ -2644,16 +2643,17 @@ export class CodexAppServerClient {
       interrupt: async () => {
         interrupted = true;
         await params.onInterrupted?.();
-        if (reviewThreadId) {
+        if (reviewThreadId && turnId) {
           await requestWithFallbacks({
             client,
             methods: [...TURN_INTERRUPT_METHODS],
-            payloads: [
-              { threadId: reviewThreadId, turnId: turnId || undefined },
-              { thread_id: reviewThreadId, turn_id: turnId || undefined },
-            ],
+            payloads: buildTurnInterruptPayloads({ threadId: reviewThreadId, turnId }),
             timeoutMs: this.settings.requestTimeoutMs,
           }).catch(() => undefined);
+        } else if (reviewThreadId) {
+          this.logger.debug(
+            `codex review interrupt ignored without active turn reviewThread=${reviewThreadId}`,
+          );
         }
         completeTurn?.();
       },
@@ -2850,16 +2850,17 @@ export class CodexAppServerClient {
         methodLower.includes("requestapproval") && typeof responseRecord?.steerText === "string"
           ? responseRecord.steerText.trim()
           : "";
-      if (steerText && threadId) {
+      if (steerText && threadId && turnId) {
         await requestWithFallbacks({
           client,
           methods: [...TURN_STEER_METHODS],
-          payloads: [
-            { threadId, turnId: turnId || undefined, text: steerText },
-            { thread_id: threadId, turn_id: turnId || undefined, text: steerText },
-          ],
+          payloads: buildTurnSteerPayloads({ threadId, turnId, text: steerText }),
           timeoutMs: this.settings.requestTimeoutMs,
         });
+      } else if (steerText && threadId) {
+        this.logger.warn(
+          `codex turn interactive steer dropped without active turn run=${params.runId} thread=${threadId}`,
+        );
       }
       return mappedResponse;
     });
@@ -2878,7 +2879,7 @@ export class CodexAppServerClient {
         if (!threadId) {
           const created = await requestWithFallbacks({
             client,
-            methods: ["thread/new", "thread/start"],
+            methods: ["thread/start", "thread/new"],
             payloads: [
               { cwd: params.workspaceDir, model: params.model },
               { cwd: params.workspaceDir },
@@ -2895,7 +2896,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/resume"],
-            payloads: [{ threadId }, { thread_id: threadId }],
+            payloads: [{ threadId }],
             timeoutMs: this.settings.requestTimeoutMs,
           }).catch(() => undefined);
           this.logger.debug(`codex turn thread resumed run=${params.runId} thread=${threadId}`);
@@ -2951,7 +2952,7 @@ export class CodexAppServerClient {
           await requestWithFallbacks({
             client,
             methods: ["thread/unsubscribe"],
-            payloads: [{ threadId }, { thread_id: threadId }],
+            payloads: [{ threadId }],
             timeoutMs: this.settings.requestTimeoutMs,
           }).catch(() => undefined);
         }
@@ -2999,13 +3000,16 @@ export class CodexAppServerClient {
           this.logger.debug(`codex turn queue rejected before thread assignment run=${params.runId}`);
           return false;
         }
+        if (!turnId) {
+          this.logger.warn(
+            `codex turn queue rejected without active turn run=${params.runId} thread=${threadId}`,
+          );
+          return false;
+        }
         await requestWithFallbacks({
           client,
           methods: [...TURN_STEER_METHODS],
-          payloads: [
-            { threadId, turnId: turnId || undefined, text: trimmed },
-            { thread_id: threadId, turn_id: turnId || undefined, text: trimmed },
-          ],
+          payloads: buildTurnSteerPayloads({ threadId, turnId, text: trimmed }),
           timeoutMs: this.settings.requestTimeoutMs,
         });
         this.logger.debug(
@@ -3046,15 +3050,18 @@ export class CodexAppServerClient {
           `codex turn interrupt requested run=${params.runId} thread=${threadId} turn=${turnId || "<none>"}`,
         );
         await params.onInterrupted?.();
-        await requestWithFallbacks({
-          client,
-          methods: [...TURN_INTERRUPT_METHODS],
-          payloads: [
-            { threadId, turnId: turnId || undefined },
-            { thread_id: threadId, turn_id: turnId || undefined },
-          ],
-          timeoutMs: this.settings.requestTimeoutMs,
-        }).catch(() => undefined);
+        if (turnId) {
+          await requestWithFallbacks({
+            client,
+            methods: [...TURN_INTERRUPT_METHODS],
+            payloads: buildTurnInterruptPayloads({ threadId, turnId }),
+            timeoutMs: this.settings.requestTimeoutMs,
+          }).catch(() => undefined);
+        } else {
+          this.logger.debug(
+            `codex turn interrupt ignored without active turn run=${params.runId} thread=${threadId}`,
+          );
+        }
         completeTurn?.();
       },
       isAwaitingInput: () => awaitingInput,
@@ -3064,7 +3071,9 @@ export class CodexAppServerClient {
 }
 
 export const __testing = {
+  buildThreadResumePayloads,
   buildTurnStartPayloads,
+  buildTurnSteerPayloads,
   createPendingInputCoordinator,
   extractFileChangePathsFromReadResult,
   extractStartupProbeInfo,

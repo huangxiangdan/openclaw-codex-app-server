@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { __testing } from "./client.js";
 
 describe("buildTurnStartPayloads", () => {
-  it("uses only text input variants for normal turns", () => {
+  it("uses the canonical v2 turn/start payload for normal turns", () => {
     expect(
       __testing.buildTurnStartPayloads({
         threadId: "thread-123",
@@ -15,15 +15,10 @@ describe("buildTurnStartPayloads", () => {
         input: [{ type: "text", text: "ship it" }],
         model: "gpt-5.4",
       },
-      {
-        thread_id: "thread-123",
-        input: [{ type: "text", text: "ship it" }],
-        model: "gpt-5.4",
-      },
     ]);
   });
 
-  it("prefers text-only collaboration payloads and preserves explicit null developer instructions", () => {
+  it("keeps collaboration payloads valid by including settings and preserving explicit null developer instructions", () => {
     expect(
       __testing.buildTurnStartPayloads({
         threadId: "thread-123",
@@ -51,7 +46,7 @@ describe("buildTurnStartPayloads", () => {
         },
       },
       {
-        thread_id: "thread-123",
+        threadId: "thread-123",
         input: [{ type: "text", text: "plan it" }],
         model: "gpt-5.4",
         collaboration_mode: {
@@ -66,27 +61,44 @@ describe("buildTurnStartPayloads", () => {
         threadId: "thread-123",
         input: [{ type: "text", text: "plan it" }],
         model: "gpt-5.4",
-        collaborationMode: {
-          mode: "plan",
-        },
       },
-      {
-        thread_id: "thread-123",
-        input: [{ type: "text", text: "plan it" }],
-        model: "gpt-5.4",
-        collaboration_mode: {
-          mode: "plan",
-        },
-      },
+    ]);
+  });
+});
+
+describe("buildTurnSteerPayloads", () => {
+  it("uses expectedTurnId plus text input for turn/steer", () => {
+    expect(
+      __testing.buildTurnSteerPayloads({
+        threadId: "thread-123",
+        turnId: "turn-456",
+        text: "continue",
+      }),
+    ).toEqual([
       {
         threadId: "thread-123",
-        input: [{ type: "text", text: "plan it" }],
-        model: "gpt-5.4",
+        expectedTurnId: "turn-456",
+        input: [{ type: "text", text: "continue" }],
       },
-      {
-        thread_id: "thread-123",
-        input: [{ type: "text", text: "plan it" }],
+    ]);
+  });
+});
+
+describe("buildThreadResumePayloads", () => {
+  it("uses the canonical camelCase resume payload", () => {
+    expect(
+      __testing.buildThreadResumePayloads({
+        threadId: "thread-123",
         model: "gpt-5.4",
+        cwd: "/tmp/workspace",
+        serviceTier: "default",
+      }),
+    ).toEqual([
+      {
+        threadId: "thread-123",
+        model: "gpt-5.4",
+        cwd: "/tmp/workspace",
+        serviceTier: "default",
       },
     ]);
   });
