@@ -1,6 +1,8 @@
-# OpenClaw Codex App Server Plugin
+# OpenClaw App Server Bridge
 
-Codex App Server as an OpenClaw plugin for Telegram and Discord conversations. It binds a chat to a Codex thread, forwards plain-text messages into that thread, and exposes command-driven controls for resume, planning, review, model selection, compaction, and more.
+Independent OpenClaw bridge for using Codex App Server from Telegram and Discord conversations. It binds a chat to a Codex thread, forwards plain-text messages into that thread, and exposes command-driven controls for resume, planning, review, model selection, compaction, and more.
+
+This repository is a simple bridge for using Codex through OpenClaw. It is not affiliated with or endorsed by OpenAI.
 
 ## Local Setup Before OpenClaw PR #45318 Lands
 

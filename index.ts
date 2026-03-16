@@ -24,8 +24,8 @@ const COMMANDS = [
 
 const plugin = {
   id: "openclaw-codex-app-server",
-  name: "OpenClaw App Server",
-  description: "Codex App Server as an OpenClaw plugin.",
+  name: "OpenClaw App Server Bridge",
+  description: "Independent OpenClaw bridge for Codex App Server.",
   register(api: OpenClawPluginApi) {
     const controller = new CodexPluginController(api);
 
