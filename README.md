@@ -1,75 +1,52 @@
 # OpenClaw App Server Bridge
 
-Independent OpenClaw bridge for using Codex App Server from Telegram and Discord conversations. It binds a chat to a Codex thread, forwards plain-text messages into that thread, and exposes command-driven controls for resume, planning, review, model selection, compaction, and more.
+Independent OpenClaw bridge for using Codex App Server from Telegram and Discord conversations. Bind a chat to a Codex thread, talk to it with plain text, and control it with chat-native commands for resume, planning, review, model selection, compaction, and more.
 
 This repository is a simple bridge for using Codex through OpenClaw. It is not affiliated with or endorsed by OpenAI.
 
-## Local Setup Before OpenClaw PR #45318 Lands
+If `codex` already works on the machine running OpenClaw, this plugin should work too. It uses the same local Codex CLI and shared login state. There is no separate plugin login requirement for normal use.
 
-This plugin targets the plugin interface from [openclaw/openclaw#45318](https://github.com/openclaw/openclaw/pull/45318). Until that work is merged and shipped in the latest OpenClaw release, develop against a local OpenClaw checkout on that PR branch or `main` once merged.
+## Quick Start
 
-### 0. Clone this repository
+1. Install the plugin into OpenClaw.
+2. Start in the Telegram or Discord conversation where you want the bridge bound.
+3. Run `/codex_resume`.
+4. Pick a project and thread, or search directly.
+5. Once bound, plain text in that conversation routes to the selected Codex thread.
 
-```bash
-git clone <this-repo-url>
-cd openclaw-codex-app-server
-```
+Buttons are presented for project and thread selection, model switching, and skill shortcuts. If your filter is ambiguous, the plugin sends a picker instead of guessing.
 
-### 1. Check out OpenClaw with the plugin interface
+## Install In OpenClaw
 
-```bash
-git clone https://github.com/openclaw/openclaw.git
-cd openclaw
-gh pr checkout 45318
-pnpm install
-```
+These are the intended install commands once OpenClaw ships a build after `2026-03-16` with the plugin interface needed by this package.
 
-If you are not using `gh`, fetch the PR directly:
+Install:
 
 ```bash
-git fetch origin pull/45318/head:pr-45318
-git checkout pr-45318
-pnpm install
+openclaw plugins install openclaw-codex-app-server
 ```
 
-Once the PR is merged, use `main` instead.
-
-### 2. Install the plugin from your local checkout
-
-From the openclaw repository:
+Uninstall:
 
 ```bash
-pnpm openclaw plugins install --link "/absolute/path/to/openclaw-codex-app-server"
+openclaw plugins uninstall openclaw-codex-app-server
 ```
 
-### 3. Start OpenClaw
+OpenClaw `main` included the required plugin interface changes as of `2026-03-16`. Use any OpenClaw release that includes those changes, or use the local developer workflow at the bottom of this document.
 
-From your OpenClaw checkout:
+## Why Try It
 
-```bash
-pnpm gateway:watch
-```
-
-### Optional: override `openclaw` locally inside this repo
-
-This repository no longer commits a machine-local `openclaw` dev dependency, so CI stays portable. If you want a local checkout of this plugin repo to resolve `openclaw` from your own OpenClaw source tree, add a local-only override in your working copy:
-
-```bash
-pnpm add -D openclaw@file:/absolute/path/to/openclaw
-pnpm install
-```
-
-That override is for local development only. Do not commit the resulting `package.json` or `pnpm-lock.yaml` changes.
+- Uses your existing local Codex CLI setup instead of a separate hosted bridge.
+- Feels natural in chat: bind once with `/codex_resume`, then just talk.
+- Keeps useful controls close at hand with `/codex_status`, `/codex_plan`, `/codex_review`, `/codex_model`, and more.
+- Works well for Telegram and Discord conversations that you want tied to a real Codex thread.
 
 ## Typical Workflow
 
-1. Start in the Telegram or Discord conversation where you want Codex bound.
-2. Run `/codex_resume`.
-3. Use the buttons to browse projects and threads, or pass filters in the command.
-4. Once bound, plain text in that conversation routes to the selected Codex thread.
-5. Use the control commands below as needed.
-
-Buttons are presented for project and thread selection, model switching, and skill shortcuts. If your filter is ambiguous, the plugin sends a picker instead of guessing.
+1. Run `/codex_resume` in the conversation you want to bind.
+2. Use the picker buttons, or pass a filter like `/codex_resume release-fix` or `/codex_resume --projects`.
+3. Send normal chat messages once the thread is bound.
+4. Use control commands such as `/codex_status`, `/codex_plan`, `/codex_review`, `/codex_model`, and `/codex_stop` as needed.
 
 ## Command Reference
 
@@ -122,6 +99,62 @@ The plugin schema in [`openclaw.plugin.json`](./openclaw.plugin.json) supports:
 - `defaultWorkspaceDir`: fallback workspace for unbound actions
 - `defaultModel`: model used when a new thread starts without an explicit selection
 - `defaultServiceTier`: default service tier for new turns
+
+## Developer Workflow With A Local OpenClaw Checkout
+
+Use this path when you are testing a local checkout of this repository against a local OpenClaw build before the required plugin interface is available in a released OpenClaw version.
+
+### 1. Check out OpenClaw with the required plugin interface
+
+This plugin originally targeted [openclaw/openclaw#45318](https://github.com/openclaw/openclaw/pull/45318). Use that branch if it is still unmerged, or use `main` once the change has landed there.
+
+```bash
+git clone https://github.com/openclaw/openclaw.git
+cd openclaw
+gh pr checkout 45318
+pnpm install
+```
+
+If you are not using `gh`, fetch the PR directly:
+
+```bash
+git fetch origin pull/45318/head:pr-45318
+git checkout pr-45318
+pnpm install
+```
+
+### 2. Install this plugin from a local checkout
+
+From the OpenClaw repository:
+
+```bash
+pnpm openclaw plugins install --link "/absolute/path/to/openclaw-codex-app-server"
+```
+
+Remove the linked local checkout:
+
+```bash
+pnpm openclaw plugins uninstall openclaw-codex-app-server
+```
+
+### 3. Start the local gateway
+
+From the OpenClaw checkout:
+
+```bash
+pnpm gateway:watch
+```
+
+### 4. Optional local dependency override inside this repo
+
+This repository no longer commits a machine-local `openclaw` dev dependency, so CI stays portable. If you want this plugin checkout to resolve `openclaw` from your own local OpenClaw source tree, add a local-only override in your working copy:
+
+```bash
+pnpm add -D openclaw@file:/absolute/path/to/openclaw
+pnpm install
+```
+
+That override is for local development only. Do not commit the resulting `package.json` or `pnpm-lock.yaml` changes.
 
 ## Development Checks
 
