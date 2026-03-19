@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi, PluginCommandContext } from "openclaw/plugin-sdk";
 import { CodexAppServerClient } from "./client.js";
 import { CodexPluginController } from "./controller.js";
+import type { ThreadSummary } from "./types.js";
 
 const discordSdkState = vi.hoisted(() => ({
   buildDiscordComponentMessage: vi.fn((params: { spec: { text?: string; blocks?: unknown[] } }) => ({
@@ -123,13 +124,16 @@ async function createControllerHarness() {
   const controller = new CodexPluginController(api);
   await controller.start();
   const clientMock = {
-    listThreads: vi.fn(async () => [
+    listThreads: vi.fn(async (): Promise<ThreadSummary[]> => [
       {
         threadId: "thread-1",
         title: "Discord Thread",
         projectKey: "/repo/openclaw",
         createdAt: Date.now() - 60_000,
         updatedAt: Date.now() - 30_000,
+        status: {
+          type: "idle",
+        },
       },
     ]),
     listModels: vi.fn(async () => [
@@ -897,6 +901,138 @@ describe("Discord controller flows", () => {
       accountId: "default",
       conversationId: "123",
     })).toBeNull();
+  });
+
+  it("enables cas_monitor and reports cross-thread activity", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+    clientMock.listThreads.mockResolvedValue([
+      {
+        threadId: "thread-approval",
+        title: "Approve deploy",
+        projectKey: "/repo/openclaw",
+        updatedAt: Date.now() - 60_000,
+        status: {
+          type: "active",
+          activeFlags: ["waitingOnApproval"],
+        },
+      },
+      {
+        threadId: "thread-unread",
+        title: "Fresh output",
+        projectKey: "/repo/openclaw",
+        updatedAt: Date.now() - 30_000,
+        status: {
+          type: "idle",
+        },
+      },
+    ]);
+
+    const reply = await controller.handleCommand(
+      "cas_monitor",
+      buildDiscordCommandContext({
+        commandBody: "/cas_monitor",
+      }),
+    );
+
+    expect(reply.text).toContain("Monitor: active");
+    expect(reply.text).toContain("Pending approvals:");
+    expect(reply.text).toContain("Unread activity:");
+    expect((controller as any).store.getMonitorBinding({
+      channel: "discord",
+      accountId: "default",
+      conversationId: "channel:chan-1",
+    })).toEqual(
+      expect.objectContaining({
+        workspaceDir: undefined,
+      }),
+    );
+  });
+
+  it("detaches monitor bindings with cas_detach", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertMonitorBinding({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "channel:chan-1",
+      },
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_detach",
+      buildDiscordCommandContext({
+        commandBody: "/cas_detach",
+      }),
+    );
+
+    expect(reply).toEqual({
+      text: "Detached this conversation from Codex.",
+    });
+    expect((controller as any).store.getMonitorBinding({
+      channel: "discord",
+      accountId: "default",
+      conversationId: "channel:chan-1",
+    })).toBeNull();
+  });
+
+  it("does not claim inbound messages for monitor-only conversations", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertMonitorBinding({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "channel:chan-1",
+      },
+      updatedAt: Date.now(),
+    });
+
+    const result = await controller.handleInboundClaim({
+      content: "hello",
+      channel: "discord",
+      accountId: "default",
+      conversationId: "discord:channel:chan-1",
+      metadata: { guildId: "guild-1" },
+    });
+
+    expect(result).toEqual({ handled: false });
+  });
+
+  it("dedupes unchanged monitor refresh summaries", async () => {
+    const { controller, clientMock, sendMessageDiscord } = await createControllerHarness();
+    await (controller as any).store.upsertMonitorBinding({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "channel:chan-1",
+      },
+      updatedAt: Date.now(),
+    });
+    clientMock.listThreads.mockResolvedValue([
+      {
+        threadId: "thread-unread",
+        title: "Fresh output",
+        projectKey: "/repo/openclaw",
+        updatedAt: Date.now() - 30_000,
+        status: {
+          type: "idle",
+        },
+      },
+    ]);
+
+    await (controller as any).refreshMonitorBindings({ force: true });
+    await (controller as any).refreshMonitorBindings();
+
+    expect(sendMessageDiscord).toHaveBeenCalledTimes(1);
+    expect((controller as any).store.getMonitorBinding({
+      channel: "discord",
+      accountId: "default",
+      conversationId: "channel:chan-1",
+    })).toEqual(
+      expect.objectContaining({
+        lastSummarySignature: expect.stringContaining("Unread activity:"),
+      }),
+    );
   });
 
   it("shows plan mode on in cas_status when the bound conversation has an active plan run", async () => {

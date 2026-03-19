@@ -35,6 +35,7 @@ import {
   formatExperimentalFeatures,
   formatMcpServers,
   formatModels,
+  formatMonitorStatusText,
   parseCodexReviewOutput,
   formatProjectPickerIntro,
   formatReviewCompletion,
@@ -74,8 +75,10 @@ import {
   type ConversationTarget,
   type PendingInputState,
   type StoredBinding,
+  type StoredMonitorBinding,
   type StoredPendingBind,
   type StoredPendingRequest,
+  type ThreadSummary,
 } from "./types.js";
 
 type ActiveRunRecord = {
@@ -418,6 +421,8 @@ const REVIEW_PROGRESS_DELAY_MS = 12_000;
 const COMPACT_PROGRESS_DELAY_MS = 12_000;
 const COMPACT_PROGRESS_INTERVAL_MS = 15_000;
 const PLAN_INLINE_TEXT_LIMIT = 2600;
+const MONITOR_POLL_INTERVAL_MS = 30_000;
+const MONITOR_REFRESH_DEBOUNCE_MS = 1_500;
 
 function isTransportClosedMessage(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
@@ -500,6 +505,26 @@ function parseRenameArgs(args: string): { syncTopic: boolean; name: string } | n
   return { syncTopic, name };
 }
 
+function parseMonitorArgs(
+  args: string,
+): { mode: "enable"; workspaceDir?: string } | { mode: "off" } | { mode: "status" } | { error: string } {
+  const normalized = normalizeOptionDashes(args).trim();
+  if (!normalized) {
+    return { mode: "enable" };
+  }
+  if (normalized === "off" || normalized === "--off") {
+    return { mode: "off" };
+  }
+  if (normalized === "status") {
+    return { mode: "status" };
+  }
+  const parsed = parseThreadSelectionArgs(args);
+  if (parsed.query) {
+    return { error: "Usage: /cas_monitor [status|off|--cwd /path]" };
+  }
+  return { mode: "enable", workspaceDir: parsed.cwd };
+}
+
 function buildResumeTopicName(params: { title?: string; projectKey?: string; threadId: string }): string | undefined {
   const threadName = params.title?.trim() || params.threadId.trim();
   if (!threadName) {
@@ -553,6 +578,10 @@ function summarizeTextForLog(text: string, maxChars = 120): string {
   return `${normalized.slice(0, Math.max(1, maxChars - 1)).trimEnd()}…`;
 }
 
+function threadHasActiveFlag(thread: ThreadSummary, flag: "waitingOnApproval" | "waitingOnUserInput"): boolean {
+  return thread.status?.type === "active" && thread.status.activeFlags.includes(flag);
+}
+
 export class CodexPluginController {
   private readonly settings;
   private readonly client;
@@ -561,6 +590,10 @@ export class CodexPluginController {
   private readonly store;
   private serviceWorkspaceDir?: string;
   private lastRuntimeConfig?: unknown;
+  private monitorPollTimer: NodeJS.Timeout | null = null;
+  private monitorRefreshTimer: NodeJS.Timeout | null = null;
+  private monitorRefreshPromise: Promise<void> | null = null;
+  private removeClientNotificationListener: (() => void) | null = null;
   private started = false;
 
   constructor(private readonly api: OpenClawPluginApi) {
@@ -588,6 +621,13 @@ export class CodexPluginController {
     }
     await this.store.load();
     await this.client.logStartupProbe().catch(() => undefined);
+    this.removeClientNotificationListener = this.client.onNotification(() => {
+      this.scheduleMonitorRefresh();
+    });
+    this.monitorPollTimer = setInterval(() => {
+      this.scheduleMonitorRefresh(0);
+    }, MONITOR_POLL_INTERVAL_MS);
+    this.monitorPollTimer.unref?.();
     this.started = true;
   }
 
@@ -595,6 +635,16 @@ export class CodexPluginController {
     if (!this.started) {
       return;
     }
+    if (this.monitorPollTimer) {
+      clearInterval(this.monitorPollTimer);
+      this.monitorPollTimer = null;
+    }
+    if (this.monitorRefreshTimer) {
+      clearTimeout(this.monitorRefreshTimer);
+      this.monitorRefreshTimer = null;
+    }
+    this.removeClientNotificationListener?.();
+    this.removeClientNotificationListener = null;
     for (const active of this.activeRuns.values()) {
       await active.handle.interrupt().catch(() => undefined);
     }
@@ -723,14 +773,19 @@ export class CodexPluginController {
         }
       }
       const existingBinding = this.store.getBinding(conversation);
+      const monitorBinding = this.store.getMonitorBinding(conversation);
       const hydratedBinding = existingBinding ? null : await this.hydrateApprovedBinding(conversation);
       const resolvedBinding = existingBinding ?? hydratedBinding?.binding ?? null;
       this.api.logger.debug?.(
         `codex inbound claim channel=${conversation.channel} account=${conversation.accountId} conversation=${conversation.conversationId} parent=${conversation.parentConversationId ?? "<none>"} local=${resolvedBinding ? "yes" : "no"}`,
       );
       if (!resolvedBinding) {
+        if (monitorBinding) {
+          return { handled: false };
+        }
         return { handled: false };
       }
+      await this.markThreadSeenFromBinding(resolvedBinding);
       if (hydratedBinding?.pendingBind?.syncTopic) {
         const syncedName = buildResumeTopicName({
           title: hydratedBinding.pendingBind.threadTitle,
@@ -999,6 +1054,8 @@ export class CodexPluginController {
         ? await bindingApi.getCurrentConversationBinding()
         : null;
     const pendingBind = conversation ? this.store.getPendingBind(conversation) : null;
+    const monitorBinding = conversation ? this.store.getMonitorBinding(conversation) : null;
+    const pendingBind = conversation ? this.store.getPendingBind(conversation) : null;
     const existingBinding =
       conversation && currentBinding ? this.store.getBinding(conversation) : null;
     const hydratedBinding =
@@ -1018,6 +1075,7 @@ export class CodexPluginController {
         return await this.handleJoinCommand(
           conversation,
           binding,
+          monitorBinding,
           args,
           ctx.channel,
           ctx,
@@ -1028,18 +1086,29 @@ export class CodexPluginController {
         if (!conversation) {
           return { text: "This command needs a Telegram or Discord conversation." };
         }
-        const detachResult = await bindingApi.detachConversationBinding?.();
+        const detachResult =
+          currentBinding || binding ? await bindingApi.detachConversationBinding?.() : undefined;
         await this.unbindConversation(conversation);
         return {
-          text: detachResult?.removed
-            ? "Detached this conversation from Codex."
-            : "This conversation is not currently bound to Codex.",
+          text:
+            detachResult?.removed || monitorBinding
+              ? "Detached this conversation from Codex."
+              : "This conversation is not currently bound to Codex.",
         };
       case "cas_status":
         return await this.handleStatusCommand(
           conversation,
           binding,
+          monitorBinding,
           Boolean(currentBinding || binding),
+        );
+      case "cas_monitor":
+        return await this.handleMonitorCommand(
+          conversation,
+          binding,
+          monitorBinding,
+          args,
+          currentBinding ? bindingApi : undefined,
         );
       case "cas_stop":
         return await this.handleStopCommand(conversation);
@@ -1102,6 +1171,7 @@ export class CodexPluginController {
   private async handleJoinCommand(
     conversation: ConversationTarget | null,
     binding: StoredBinding | null,
+    monitorBinding: StoredMonitorBinding | null,
     args: string,
     channel: string,
     ctx: PluginCommandContext,
@@ -1218,6 +1288,9 @@ export class CodexPluginController {
     if (bindResult.status === "error") {
       return { text: bindResult.message };
     }
+    if (monitorBinding) {
+      await this.removeMonitorBinding(conversation);
+    }
     if (parsed.syncTopic) {
       const syncedName = buildResumeTopicName({
         title: selection.thread.title,
@@ -1235,11 +1308,74 @@ export class CodexPluginController {
   private async handleStatusCommand(
     conversation: ConversationTarget | null,
     binding: StoredBinding | null,
+    monitorBinding: StoredMonitorBinding | null,
     bindingActive: boolean,
   ): Promise<ReplyPayload> {
+    if (conversation && monitorBinding && !binding) {
+      return {
+        text: await this.buildMonitorStatusText(monitorBinding),
+      };
+    }
+    if (conversation && binding) {
+      await this.markThreadSeenFromBinding(binding);
+    }
     return {
       text: await this.buildStatusText(conversation, binding, bindingActive),
     };
+  }
+
+  private async handleMonitorCommand(
+    conversation: ConversationTarget | null,
+    binding: StoredBinding | null,
+    monitorBinding: StoredMonitorBinding | null,
+    args: string,
+    bindingApi?: Pick<ScopedBindingApi, "detachConversationBinding">,
+  ): Promise<ReplyPayload> {
+    if (!conversation) {
+      return { text: "This command needs a Telegram or Discord conversation." };
+    }
+    const parsed = parseMonitorArgs(args);
+    if ("error" in parsed) {
+      return { text: parsed.error };
+    }
+    if (parsed.mode === "off") {
+      if (!monitorBinding) {
+        return { text: "Monitor mode is not active for this conversation." };
+      }
+      await this.removeMonitorBinding(conversation);
+      return { text: "Monitor mode is off for this conversation." };
+    }
+    if (parsed.mode === "status") {
+      return {
+        text: monitorBinding
+          ? await this.buildMonitorStatusText(monitorBinding)
+          : "Monitor mode is not active for this conversation.",
+      };
+    }
+    if (binding) {
+      await bindingApi?.detachConversationBinding?.().catch(() => undefined);
+      if (binding.pinnedBindingMessage) {
+        await this.unpinStoredBindingMessage(binding).catch(() => undefined);
+      }
+      await this.store.removeBinding(conversation);
+    }
+    const nextMonitorBinding: StoredMonitorBinding = {
+      conversation: {
+        channel: conversation.channel,
+        accountId: conversation.accountId,
+        conversationId: conversation.conversationId,
+        parentConversationId: conversation.parentConversationId,
+      },
+      workspaceDir: parsed.workspaceDir,
+      lastSummarySignature: undefined,
+      updatedAt: Date.now(),
+    };
+    const text = await this.buildMonitorStatusText(nextMonitorBinding);
+    await this.store.upsertMonitorBinding({
+      ...nextMonitorBinding,
+      lastSummarySignature: text,
+    });
+    return { text };
   }
 
   private async handleStopCommand(conversation: ConversationTarget | null): Promise<ReplyPayload> {
@@ -2876,6 +3012,7 @@ export class CodexPluginController {
         await responders.reply(bindResult.message);
         return;
       }
+      await this.removeMonitorBinding(callback.conversation);
       await this.store.removeCallback(callback.token);
       if (callback.syncTopic) {
         const syncedName = buildResumeTopicName({
@@ -3340,6 +3477,15 @@ export class CodexPluginController {
   private async sendBoundConversationSummary(
     conversation: ConversationTarget | ConversationRef,
   ): Promise<void> {
+    const binding = this.store.getBinding({
+      channel: conversation.channel,
+      accountId: conversation.accountId,
+      conversationId: conversation.conversationId,
+      parentConversationId: conversation.parentConversationId,
+    });
+    if (binding) {
+      await this.markThreadSeenFromBinding(binding);
+    }
     const messages = await this.buildBoundConversationMessages(conversation);
     const target: ConversationTarget = {
       channel: conversation.channel,
@@ -3401,6 +3547,111 @@ export class CodexPluginController {
       contextUsage: binding?.contextUsage,
       planMode: bindingActive ? activeRun?.mode === "plan" : undefined,
     });
+  }
+
+  private scheduleMonitorRefresh(delayMs = MONITOR_REFRESH_DEBOUNCE_MS): void {
+    if (this.monitorRefreshTimer) {
+      clearTimeout(this.monitorRefreshTimer);
+    }
+    this.monitorRefreshTimer = setTimeout(() => {
+      this.monitorRefreshTimer = null;
+      void this.refreshMonitorBindings();
+    }, delayMs);
+    this.monitorRefreshTimer.unref?.();
+  }
+
+  private async buildMonitorStatusText(binding: StoredMonitorBinding): Promise<string> {
+    const threads = await this.client.listThreads({
+      workspaceDir: binding.workspaceDir,
+    });
+    const summary = this.selectMonitorSummaryThreads(threads);
+    return formatMonitorStatusText({
+      workspaceDir: binding.workspaceDir,
+      approvals: summary.approvals,
+      questions: summary.questions,
+      unread: summary.unread,
+    });
+  }
+
+  private selectMonitorSummaryThreads(threads: ThreadSummary[]): {
+    approvals: ThreadSummary[];
+    questions: ThreadSummary[];
+    unread: ThreadSummary[];
+  } {
+    const approvals = threads.filter((thread) => threadHasActiveFlag(thread, "waitingOnApproval"));
+    const questions = threads.filter((thread) => threadHasActiveFlag(thread, "waitingOnUserInput"));
+    const claimed = new Set([...approvals, ...questions].map((thread) => thread.threadId));
+    const unread = threads.filter((thread) => {
+      if (claimed.has(thread.threadId)) {
+        return false;
+      }
+      const lastActivityAt = thread.updatedAt ?? thread.createdAt;
+      if (!lastActivityAt) {
+        return false;
+      }
+      const seen = this.store.getThreadSeenState(thread.threadId);
+      return lastActivityAt > (seen?.lastSeenUpdatedAt ?? 0);
+    });
+    return {
+      approvals: approvals.slice(0, 5),
+      questions: questions.slice(0, 5),
+      unread: unread.slice(0, 8),
+    };
+  }
+
+  private async refreshMonitorBindings(params?: { force?: boolean }): Promise<void> {
+    if (this.monitorRefreshPromise) {
+      await this.monitorRefreshPromise;
+      return;
+    }
+    this.monitorRefreshPromise = (async () => {
+      const monitorBindings = this.store.listMonitorBindings();
+      for (const binding of monitorBindings) {
+        try {
+          const text = await this.buildMonitorStatusText(binding);
+          if (!params?.force && binding.lastSummarySignature === text) {
+            continue;
+          }
+          const target: ConversationTarget = {
+            channel: binding.conversation.channel,
+            accountId: binding.conversation.accountId,
+            conversationId: binding.conversation.conversationId,
+            parentConversationId: binding.conversation.parentConversationId,
+          };
+          await this.sendTextWithDeliveryRef(target, text);
+          await this.store.upsertMonitorBinding({
+            ...binding,
+            lastSummarySignature: text,
+            updatedAt: Date.now(),
+          });
+        } catch (error) {
+          this.api.logger.warn(`codex monitor refresh failed: ${String(error)}`);
+        }
+      }
+    })();
+    try {
+      await this.monitorRefreshPromise;
+    } finally {
+      this.monitorRefreshPromise = null;
+    }
+  }
+
+  private async markThreadSeenFromBinding(binding: StoredBinding): Promise<void> {
+    const threads = await this.client.listThreads({
+      sessionKey: binding.sessionKey,
+      workspaceDir: binding.workspaceDir,
+      filter: binding.threadId,
+    }).catch(() => []);
+    const matched = threads.find((thread) => thread.threadId === binding.threadId);
+    const lastSeenUpdatedAt = matched?.updatedAt ?? matched?.createdAt;
+    await this.store.upsertThreadSeenState({
+      threadId: binding.threadId,
+      lastSeenUpdatedAt,
+      threadTitle: matched?.title ?? binding.threadTitle,
+      workspaceDir: matched?.projectKey ?? binding.workspaceDir,
+      updatedAt: Date.now(),
+    });
+    this.scheduleMonitorRefresh(0);
   }
 
   private buildCompactStartText(usage?: StoredBinding["contextUsage"]): string {
@@ -3642,12 +3893,17 @@ export class CodexPluginController {
     }
   }
 
+  private async removeMonitorBinding(conversation: ConversationTarget): Promise<void> {
+    await this.store.removeMonitorBinding(conversation);
+  }
+
   private async unbindConversation(conversation: ConversationTarget): Promise<void> {
     const binding = this.store.getBinding(conversation);
     if (binding?.pinnedBindingMessage) {
       await this.unpinStoredBindingMessage(binding);
     }
     await this.store.removeBinding(conversation);
+    await this.removeMonitorBinding(conversation);
   }
 
   private async reconcileBindings(): Promise<void> {
