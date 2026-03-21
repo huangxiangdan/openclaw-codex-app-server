@@ -1055,7 +1055,6 @@ export class CodexPluginController {
         : null;
     const pendingBind = conversation ? this.store.getPendingBind(conversation) : null;
     const monitorBinding = conversation ? this.store.getMonitorBinding(conversation) : null;
-    const pendingBind = conversation ? this.store.getPendingBind(conversation) : null;
     const existingBinding =
       conversation && currentBinding ? this.store.getBinding(conversation) : null;
     const hydratedBinding =
