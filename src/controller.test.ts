@@ -199,7 +199,7 @@ function buildDiscordCommandContext(
     channelId: "discord",
     isAuthorizedSender: true,
     args: "",
-    commandBody: "/codex_resume",
+    commandBody: "/cas_resume",
     config: {},
     from: "discord:channel:chan-1",
     to: "slash:user-1",
@@ -220,7 +220,7 @@ function buildTelegramCommandContext(
     channelId: "telegram",
     isAuthorizedSender: true,
     args: "",
-    commandBody: "/codex_status",
+    commandBody: "/cas_status",
     config: {},
     from: "telegram:123",
     to: "telegram:123",
@@ -299,7 +299,7 @@ describe("Discord controller flows", () => {
   it("uses the real Discord conversation target for slash-command resume pickers", async () => {
     const { controller, sendComponentMessage } = await createControllerHarness();
 
-    const reply = await controller.handleCommand("codex_resume", buildDiscordCommandContext());
+    const reply = await controller.handleCommand("cas_resume", buildDiscordCommandContext());
 
     expect(reply).toEqual({
       text: "Sent a Codex thread picker to this Discord conversation.",
@@ -329,8 +329,8 @@ describe("Discord controller flows", () => {
       updatedAt: Date.now(),
     });
 
-    const reply = await controller.handleCommand("codex_model", buildDiscordCommandContext({
-      commandBody: "/codex_model",
+    const reply = await controller.handleCommand("cas_model", buildDiscordCommandContext({
+      commandBody: "/cas_model",
       getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
     }));
 
@@ -349,8 +349,8 @@ describe("Discord controller flows", () => {
   it("sends Discord skills directly instead of returning Telegram buttons", async () => {
     const { controller, sendComponentMessage } = await createControllerHarness();
 
-    const reply = await controller.handleCommand("codex_skills", buildDiscordCommandContext({
-      commandBody: "/codex_skills",
+    const reply = await controller.handleCommand("cas_skills", buildDiscordCommandContext({
+      commandBody: "/cas_skills",
     }));
 
     expect(reply).toEqual({
@@ -820,8 +820,8 @@ describe("Discord controller flows", () => {
       updatedAt: Date.now(),
     });
 
-    const reply = await controller.handleCommand("codex_status", buildDiscordCommandContext({
-      commandBody: "/codex_status",
+    const reply = await controller.handleCommand("cas_status", buildDiscordCommandContext({
+      commandBody: "/cas_status",
       getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
     }));
 
@@ -854,11 +854,11 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_status",
+      "cas_status",
       buildDiscordCommandContext({
         from: "discord:1177378744822943744",
         to: "slash:1177378744822943744",
-        commandBody: "/codex_status",
+        commandBody: "/cas_status",
         getCurrentConversationBinding: vi.fn(async () => null),
       }),
     );
@@ -883,9 +883,9 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_status",
+      "cas_status",
       buildTelegramCommandContext({
-        commandBody: "/codex_status",
+        commandBody: "/cas_status",
         getCurrentConversationBinding: vi.fn(async () => null),
       }),
     );
@@ -932,8 +932,8 @@ describe("Discord controller flows", () => {
       },
     });
 
-    const reply = await controller.handleCommand("codex_status", buildDiscordCommandContext({
-      commandBody: "/codex_status",
+    const reply = await controller.handleCommand("cas_status", buildDiscordCommandContext({
+      commandBody: "/cas_status",
       getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
     }));
 
@@ -962,10 +962,10 @@ describe("Discord controller flows", () => {
     }));
 
     const reply = await controller.handleCommand(
-      "codex_rename",
+      "cas_rename",
       buildTelegramCommandContext({
         args: "—sync New Topic Name",
-        commandBody: "/codex_rename —sync New Topic Name",
+        commandBody: "/cas_rename —sync New Topic Name",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
       }),
@@ -989,10 +989,10 @@ describe("Discord controller flows", () => {
     const { controller, renameTopic, sendMessageTelegram } = await createControllerHarness();
 
     const reply = await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "—sync thread-1",
-        commandBody: "/codex_resume —sync thread-1",
+        commandBody: "/cas_resume —sync thread-1",
         messageThreadId: 456,
       }),
     );
@@ -1016,10 +1016,10 @@ describe("Discord controller flows", () => {
     const fetchMock = vi.mocked(fetch);
 
     await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "thread-1",
-        commandBody: "/codex_resume thread-1",
+        commandBody: "/cas_resume thread-1",
         messageThreadId: 456,
       }),
     );
@@ -1054,9 +1054,9 @@ describe("Discord controller flows", () => {
     );
 
     await controller.handleCommand(
-      "codex_detach",
+      "cas_detach",
       buildTelegramCommandContext({
-        commandBody: "/codex_detach",
+        commandBody: "/cas_detach",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "binding-1" })),
       }),
@@ -1076,10 +1076,10 @@ describe("Discord controller flows", () => {
     vi.spyOn(controller as any, "resolveDiscordBotToken").mockResolvedValue("discord-token");
 
     await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildDiscordCommandContext({
         args: "thread-1",
-        commandBody: "/codex_resume thread-1",
+        commandBody: "/cas_resume thread-1",
       }),
     );
 
@@ -1109,9 +1109,9 @@ describe("Discord controller flows", () => {
     );
 
     await controller.handleCommand(
-      "codex_detach",
+      "cas_detach",
       buildDiscordCommandContext({
-        commandBody: "/codex_detach",
+        commandBody: "/cas_detach",
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "binding-1" })),
       }),
     );
@@ -1141,10 +1141,10 @@ describe("Discord controller flows", () => {
       });
 
     const pendingReply = await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "--sync thread-1",
-        commandBody: "/codex_resume --sync thread-1",
+        commandBody: "/cas_resume --sync thread-1",
         messageThreadId: 456,
         requestConversationBinding,
       }),
@@ -1165,10 +1165,10 @@ describe("Discord controller flows", () => {
     );
 
     const hydratedReply = await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "--sync",
-        commandBody: "/codex_resume --sync",
+        commandBody: "/cas_resume --sync",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
       }),
@@ -1222,10 +1222,10 @@ describe("Discord controller flows", () => {
     }));
 
     const reply = await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "--sync",
-        commandBody: "/codex_resume --sync",
+        commandBody: "/cas_resume --sync",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => null),
         requestConversationBinding,
@@ -1263,10 +1263,10 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_resume",
+      "cas_resume",
       buildTelegramCommandContext({
         args: "--sync",
-        commandBody: "/codex_resume --sync",
+        commandBody: "/cas_resume --sync",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => null),
         requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
@@ -1609,10 +1609,10 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_rename",
+      "cas_rename",
       buildTelegramCommandContext({
         args: "--sync",
-        commandBody: "/codex_rename --sync",
+        commandBody: "/cas_rename --sync",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
       }),
@@ -1649,10 +1649,10 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_rename",
+      "cas_rename",
       buildTelegramCommandContext({
         args: "--sync",
-        commandBody: "/codex_rename --sync",
+        commandBody: "/cas_rename --sync",
         messageThreadId: 456,
         getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
       }),
@@ -1668,9 +1668,9 @@ describe("Discord controller flows", () => {
     const { controller } = await createControllerHarness();
     const requestConversationBinding = vi.fn(async () => ({ status: "bound" as const }));
 
-    await controller.handleCommand("codex_resume", buildDiscordCommandContext({
+    await controller.handleCommand("cas_resume", buildDiscordCommandContext({
       args: "thread-1",
-      commandBody: "/codex_resume thread-1",
+      commandBody: "/cas_resume thread-1",
       requestConversationBinding,
     }));
 
@@ -2030,10 +2030,10 @@ describe("Discord controller flows", () => {
     });
 
     const reply = await controller.handleCommand(
-      "codex_plan",
+      "cas_plan",
       buildDiscordCommandContext({
         args: "off",
-        commandBody: "/codex_plan off",
+        commandBody: "/cas_plan off",
       }),
     );
 
