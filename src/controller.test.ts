@@ -943,6 +943,52 @@ describe("Discord controller flows", () => {
     );
   });
 
+  it("keeps Telegram monitor refreshes in the original topic", async () => {
+    const { controller, clientMock, sendMessageTelegram } = await createControllerHarness();
+    clientMock.listThreads.mockResolvedValue([
+      {
+        threadId: "thread-unread",
+        title: "Fresh output",
+        projectKey: "/repo/openclaw",
+        updatedAt: 1_000,
+        status: {
+          type: "idle",
+        },
+      },
+    ]);
+
+    const reply = await controller.handleCommand(
+      "cas_monitor",
+      buildTelegramCommandContext({
+        commandBody: "/cas_monitor",
+        messageThreadId: 456,
+      }),
+    );
+
+    expect(reply.text).toContain("Monitor: active");
+    expect((controller as any).store.getMonitorBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123:topic:456",
+      parentConversationId: "123",
+    })).toEqual(
+      expect.objectContaining({
+        messageThreadId: 456,
+      }),
+    );
+
+    await (controller as any).refreshMonitorBindings({ force: true });
+
+    expect(sendMessageTelegram).toHaveBeenCalledWith(
+      "123",
+      expect.stringContaining("Unread activity:"),
+      expect.objectContaining({
+        accountId: "default",
+        messageThreadId: 456,
+      }),
+    );
+  });
+
   it("detaches monitor bindings with cas_detach", async () => {
     const { controller } = await createControllerHarness();
     await (controller as any).store.upsertMonitorBinding({
@@ -995,6 +1041,8 @@ describe("Discord controller flows", () => {
 
   it("dedupes unchanged monitor refresh summaries", async () => {
     const { controller, clientMock, sendMessageDiscord } = await createControllerHarness();
+    const now = vi.spyOn(Date, "now");
+    now.mockReturnValue(120_000);
     await (controller as any).store.upsertMonitorBinding({
       conversation: {
         channel: "discord",
@@ -1008,7 +1056,7 @@ describe("Discord controller flows", () => {
         threadId: "thread-unread",
         title: "Fresh output",
         projectKey: "/repo/openclaw",
-        updatedAt: Date.now() - 30_000,
+        updatedAt: 90_000,
         status: {
           type: "idle",
         },
@@ -1016,6 +1064,7 @@ describe("Discord controller flows", () => {
     ]);
 
     await (controller as any).refreshMonitorBindings({ force: true });
+    now.mockReturnValue(181_000);
     await (controller as any).refreshMonitorBindings();
 
     expect(sendMessageDiscord).toHaveBeenCalledTimes(1);
@@ -1025,7 +1074,7 @@ describe("Discord controller flows", () => {
       conversationId: "channel:chan-1",
     })).toEqual(
       expect.objectContaining({
-        lastSummarySignature: expect.stringContaining("Unread activity:"),
+        lastSummarySignature: expect.stringContaining("\"threadId\":\"thread-unread\""),
       }),
     );
   });

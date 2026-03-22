@@ -582,6 +582,22 @@ function threadHasActiveFlag(thread: ThreadSummary, flag: "waitingOnApproval" | 
   return thread.status?.type === "active" && thread.status.activeFlags.includes(flag);
 }
 
+function getThreadActivityTimestamp(thread: ThreadSummary): number {
+  return thread.updatedAt ?? thread.createdAt ?? 0;
+}
+
+function compareMonitorThreads(left: ThreadSummary, right: ThreadSummary): number {
+  const activityDelta = getThreadActivityTimestamp(right) - getThreadActivityTimestamp(left);
+  if (activityDelta !== 0) {
+    return activityDelta;
+  }
+  const titleDelta = (left.title?.trim() || left.threadId).localeCompare(right.title?.trim() || right.threadId);
+  if (titleDelta !== 0) {
+    return titleDelta;
+  }
+  return left.threadId.localeCompare(right.threadId);
+}
+
 export class CodexPluginController {
   private readonly settings;
   private readonly client;
@@ -1365,14 +1381,15 @@ export class CodexPluginController {
         conversationId: conversation.conversationId,
         parentConversationId: conversation.parentConversationId,
       },
+      messageThreadId: conversation.threadId,
       workspaceDir: parsed.workspaceDir,
       lastSummarySignature: undefined,
       updatedAt: Date.now(),
     };
-    const text = await this.buildMonitorStatusText(nextMonitorBinding);
+    const { text, signature } = await this.readMonitorSummary(nextMonitorBinding);
     await this.store.upsertMonitorBinding({
       ...nextMonitorBinding,
-      lastSummarySignature: text,
+      lastSummarySignature: signature,
     });
     return { text };
   }
@@ -3560,16 +3577,61 @@ export class CodexPluginController {
   }
 
   private async buildMonitorStatusText(binding: StoredMonitorBinding): Promise<string> {
+    return (await this.readMonitorSummary(binding)).text;
+  }
+
+  private async readMonitorSummary(binding: StoredMonitorBinding): Promise<{
+    text: string;
+    signature: string;
+  }> {
     const threads = await this.client.listThreads({
       workspaceDir: binding.workspaceDir,
     });
     const summary = this.selectMonitorSummaryThreads(threads);
-    return formatMonitorStatusText({
-      workspaceDir: binding.workspaceDir,
-      approvals: summary.approvals,
-      questions: summary.questions,
-      unread: summary.unread,
+    return {
+      text: formatMonitorStatusText({
+        workspaceDir: binding.workspaceDir,
+        approvals: summary.approvals,
+        questions: summary.questions,
+        unread: summary.unread,
+      }),
+      signature: this.buildMonitorSummarySignature(binding.workspaceDir, summary),
+    };
+  }
+
+  private buildMonitorSummarySignature(
+    workspaceDir: string | undefined,
+    summary: {
+      approvals: ThreadSummary[];
+      questions: ThreadSummary[];
+      unread: ThreadSummary[];
+    },
+  ): string {
+    return JSON.stringify({
+      workspaceDir,
+      approvals: this.serializeMonitorThreads(summary.approvals),
+      questions: this.serializeMonitorThreads(summary.questions),
+      unread: this.serializeMonitorThreads(summary.unread),
     });
+  }
+
+  private serializeMonitorThreads(threads: ThreadSummary[]): Array<{
+    threadId: string;
+    projectKey?: string;
+    title?: string;
+    activityAt: number;
+    statusType?: string;
+    activeFlags?: string[];
+  }> {
+    return threads.map((thread) => ({
+      threadId: thread.threadId,
+      projectKey: thread.projectKey,
+      title: thread.title?.trim() || undefined,
+      activityAt: getThreadActivityTimestamp(thread),
+      statusType: thread.status?.type,
+      activeFlags:
+        thread.status?.type === "active" ? [...thread.status.activeFlags].sort() : undefined,
+    }));
   }
 
   private selectMonitorSummaryThreads(threads: ThreadSummary[]): {
@@ -3592,9 +3654,9 @@ export class CodexPluginController {
       return lastActivityAt > (seen?.lastSeenUpdatedAt ?? 0);
     });
     return {
-      approvals: approvals.slice(0, 5),
-      questions: questions.slice(0, 5),
-      unread: unread.slice(0, 8),
+      approvals: [...approvals].sort(compareMonitorThreads).slice(0, 5),
+      questions: [...questions].sort(compareMonitorThreads).slice(0, 5),
+      unread: [...unread].sort(compareMonitorThreads).slice(0, 8),
     };
   }
 
@@ -3607,8 +3669,8 @@ export class CodexPluginController {
       const monitorBindings = this.store.listMonitorBindings();
       for (const binding of monitorBindings) {
         try {
-          const text = await this.buildMonitorStatusText(binding);
-          if (!params?.force && binding.lastSummarySignature === text) {
+          const { text, signature } = await this.readMonitorSummary(binding);
+          if (!params?.force && binding.lastSummarySignature === signature) {
             continue;
           }
           const target: ConversationTarget = {
@@ -3616,11 +3678,12 @@ export class CodexPluginController {
             accountId: binding.conversation.accountId,
             conversationId: binding.conversation.conversationId,
             parentConversationId: binding.conversation.parentConversationId,
+            threadId: binding.messageThreadId,
           };
           await this.sendTextWithDeliveryRef(target, text);
           await this.store.upsertMonitorBinding({
             ...binding,
-            lastSummarySignature: text,
+            lastSummarySignature: signature,
             updatedAt: Date.now(),
           });
         } catch (error) {

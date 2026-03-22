@@ -277,6 +277,7 @@ export type StoredBinding = {
 
 export type StoredMonitorBinding = {
   conversation: ConversationRef;
+  messageThreadId?: number;
   workspaceDir?: string;
   pinnedBindingMessage?:
     | {
