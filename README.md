@@ -1,5 +1,16 @@
 # OpenClaw Plugin For Codex App Server
 
+[![CI](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
+[![npm downloads](https://img.shields.io/npm/dm/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+
+<p align="center">
+  <a href="https://youtu.be/GKkipfNEJJQ">
+    <img src="https://img.youtube.com/vi/GKkipfNEJJQ/maxresdefault.jpg" alt="Watch the OpenClaw Codex App Server demo on YouTube" width="100%" />
+  </a>
+</p>
+
 This project has no product name. It is just an OpenClaw plugin that connects OpenClaw to the Codex App Server protocol so you can interact with your existing threads from Codex Desktop and Codex TUI through Telegram and Discord conversations.
 
 `Codex` is mentioned here only to describe the protocol and toolchain this plugin connects to. This repository is independent and is not official, provided, sponsored, endorsed, or affiliated with OpenAI or Codex.
@@ -76,7 +87,7 @@ Pre-release packages are published on matching npm dist-tags instead of `latest`
 | `/cas_mcp` | List configured MCP servers. | Shows auth state and counts for tools/resources/templates. |
 | `/cas_mcp github` | Filter MCP servers. | Matches name and auth status. |
 | `/cas_fast` | Toggle fast mode for the bound thread. | Equivalent to switching the service tier between default and fast. |
-| `/cas_fast on|off|status` | Set or inspect fast mode explicitly. | Example: `/cas_fast status` |
+| `/cas_fast on`, `/cas_fast off`, `/cas_fast status` | Set or inspect fast mode explicitly. | Example: `/cas_fast status` |
 | `/cas_model` | List models and show model-selection buttons. | If the conversation is not bound yet, it lists models only. |
 | `/cas_model gpt-5.4` | Set the model for the bound thread. | Requires an existing binding. |
 | `/cas_permissions` | Show account, rate-limit, and thread permission information. | Works with or without a current binding. |
@@ -87,10 +98,38 @@ Pre-release packages are published on matching npm dist-tags instead of `latest`
 
 ## Screenshot Placeholders
 
-- `[TODO screenshot] /cas_resume --projects` project picker
-- `[TODO screenshot] /cas_resume` thread picker with buttons
-- `[TODO screenshot] bound conversation after /cas_status`
-- `[TODO screenshot] /cas_model` button list
+### `/cas_resume` thread picker with buttons
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/c0202425-590a-4b23-892d-96333c0c2630" />
+
+### `/cas_resume` binding approval
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/cff5da61-d92d-43a4-8c74-be8ea4da48f1" />
+
+### `/cas_resume` restored context / pinned message
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/282b1a63-60b3-48e8-885d-916678d07204" />
+
+### `/cas_status`
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/203796f7-114d-4a13-804d-404504c2546a" />
+
+### Run `npm view openclaw-codex-app-server` and prompt to exit sandbox
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/a40e02fb-d305-4018-b280-5574a5489372" />
+
+### Tool output
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/f78d0881-bdad-4f28-bd9d-4ef338606141" />
+
+### `/cas_plan` 1st Question
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/ae26eab2-613e-423c-bf6e-63591f458b36" />
+
+### `/cas_plan` 2nd Question
+
+<img width="973" height="938" alt="image" src="https://github.com/user-attachments/assets/a082d3d5-902d-4557-acca-63702a3c9208" />
+
 
 ## Plugin Config Notes
 
