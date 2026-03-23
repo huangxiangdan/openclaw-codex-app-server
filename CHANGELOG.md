@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.3.0 - 2026-03-23
+
+### Highlights
+
+- Renamed the chat command surface from `/codex` to `/cas`, and `/cas_status` now shows the plugin version so it is easier to confirm what build is deployed. @huntharo (#29, #32)
+- Tightened the `/cas_resume` flow with better Discord thread identity handling, a global fallback when the current workspace has no matching threads, and a cancel button on the picker. @huntharo (#35, #42, #43)
+- Surfaced Codex file-edit summaries directly in chat replies so thread activity is easier to follow without leaving Telegram or Discord. @huntharo (#5)
+
+### Fixes
+
+- Stopped auto-expiring questionnaire replies after 15 minutes, so long-running plan and steering prompts stay answerable until the underlying Codex run is resolved. @huntharo (#41)
+- Detects stale worktree paths on resume and rejects them cleanly instead of letting later shell commands fail against a missing directory. @huntharo (#34)
+- Trims shell launcher wrappers like `/bin/zsh -lc '...'` from approval prompts so Telegram and Discord show the command payload that matters. @huntharo (#33)
+- Restored the default execution mode after `/cas_plan off`, stopped treating approval cancellation as an authentication failure, and improved conversation-binding reliability across host runtime versions. @huntharo (#6, #8, #26, #28)
+
+### Docs
+
+- Refreshed the README install guidance and expanded the internal notes around Codex permissions and media handling. @huntharo (#5)
+
+### Internal
+
+- Added and refined OCAS/OpenClaw regression coverage, plus published compatibility metadata for OpenClaw `2026.3.22`. @huntharo (#38, #39, #44)
+- Added prerelease publishing automation and the repo-local project-manager workflow used to manage this release line. @huntharo (#7, #22, #23, #24)
+
 ## v0.2.0 - 2026-03-16
 
 ### Highlights
