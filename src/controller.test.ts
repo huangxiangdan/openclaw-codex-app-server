@@ -355,6 +355,82 @@ describe("Discord controller flows", () => {
     );
   });
 
+  it("renders structured help text for representative commands via handleCommand", async () => {
+    const { controller } = await createControllerHarness();
+
+    const fastHelp = await controller.handleCommand("cas_fast", buildDiscordCommandContext({
+      args: "help",
+      commandBody: "/cas_fast help",
+    }));
+    const resumeHelp = await controller.handleCommand("cas_resume", buildDiscordCommandContext({
+      args: "--help",
+      commandBody: "/cas_resume --help",
+    }));
+    const renameHelp = await controller.handleCommand("cas_rename", buildDiscordCommandContext({
+      args: "help",
+      commandBody: "/cas_rename help",
+    }));
+
+    expect(fastHelp.text).toContain("/cas_fast");
+    expect(fastHelp.text).toContain("Usage:");
+    expect(fastHelp.text).toContain("Examples:");
+    expect(resumeHelp.text).toContain("/cas_resume");
+    expect(resumeHelp.text).toContain("Flags/Args:");
+    expect(renameHelp.text).toContain("/cas_rename");
+    expect(renameHelp.text).toContain("Usage:");
+  });
+
+  it("renders help when Telegram-style em dash is used for --help", async () => {
+    const { controller } = await createControllerHarness();
+
+    const resumeHelp = await controller.handleCommand("cas_resume", buildDiscordCommandContext({
+      args: "—help",
+      commandBody: "/cas_resume —help",
+    }));
+    const statusHelp = await controller.handleCommand("cas_status", buildDiscordCommandContext({
+      args: "—help",
+      commandBody: "/cas_status —help",
+    }));
+
+    expect(resumeHelp.text).toContain("/cas_resume");
+    expect(resumeHelp.text).toContain("Usage:");
+    expect(statusHelp.text).toContain("/cas_status");
+    expect(statusHelp.text).toContain("--yolo, --no-yolo");
+  });
+
+  it("keeps usage error paths for cas_fast, cas_steer, and cas_plan", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "discord",
+        accountId: "default",
+        conversationId: "channel:chan-1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const fastUsage = await controller.handleCommand("cas_fast", buildDiscordCommandContext({
+      args: "nope",
+      commandBody: "/cas_fast nope",
+      getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
+    }));
+    const steerUsage = await controller.handleCommand("cas_steer", buildDiscordCommandContext({
+      args: "",
+      commandBody: "/cas_steer",
+    }));
+    const planUsage = await controller.handleCommand("cas_plan", buildDiscordCommandContext({
+      args: "",
+      commandBody: "/cas_plan",
+    }));
+
+    expect(fastUsage).toEqual({ text: "Usage: /cas_fast [on|off|status]" });
+    expect(steerUsage).toEqual({ text: "Usage: /cas_steer <message>" });
+    expect(planUsage).toEqual({ text: "Usage: /cas_plan <goal> | /cas_plan off" });
+  });
+
   it("offers a New button on /cas_resume and flips into the new-thread project picker", async () => {
     const { controller } = await createControllerHarness();
 
@@ -613,6 +689,65 @@ describe("Discord controller flows", () => {
     expect(binding?.permissionsMode).toBe("full-access");
     expect(binding?.preferences?.preferredModel).toBe("gpt-5.4");
     expect(binding?.preferences?.preferredServiceTier).toBe("fast");
+  });
+
+  it("applies em-dash model, fast, and yolo flags when resuming a thread", async () => {
+    const { controller } = await createControllerHarness();
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildDiscordCommandContext({
+        args: "thread-1 —model gpt-5.4 —fast —yolo",
+        commandBody: "/cas_resume thread-1 —model gpt-5.4 —fast —yolo",
+      }),
+    );
+
+    expect(reply).toEqual({});
+    const binding = (controller as any).store.getBinding({
+      channel: "discord",
+      accountId: "default",
+      conversationId: "channel:chan-1",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.preferences?.preferredModel).toBe("gpt-5.4");
+    expect(binding?.preferences?.preferredServiceTier).toBe("fast");
+  });
+
+  it("preserves em-dash resume overrides through the no-query picker callback", async () => {
+    const { controller } = await createControllerHarness();
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildTelegramCommandContext({
+        args: "—model gpt-5.3-codex-spark —yolo",
+        commandBody: "/cas_resume —model gpt-5.3-codex-spark —yolo",
+      }),
+    );
+
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    const callbackData = buttons?.[0]?.[0]?.callback_data as string | undefined;
+    expect(callbackData).toMatch(/^codexapp:/);
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: callbackData?.slice("codexapp:".length) },
+      requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage: vi.fn(async () => {}),
+      },
+    } as any);
+
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.preferences?.preferredModel).toBe("gpt-5.3-codex-spark");
   });
 
   it("resolves channel identity from ctx.to when ctx.from is a slash identity in a new Discord thread", async () => {
@@ -1679,6 +1814,58 @@ describe("Discord controller flows", () => {
     expect(text).toContain("Permissions: Full Access");
   });
 
+  it("applies em-dash model, fast, and yolo flags from cas_status", async () => {
+    const { controller, clientMock, sendMessageTelegram } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_status",
+      buildTelegramCommandContext({
+        args: "—model gpt-5.4 —fast —yolo",
+        commandBody: "/cas_status —model gpt-5.4 —fast —yolo",
+        getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
+      }),
+    );
+
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.preferences?.preferredModel).toBe("gpt-5.4");
+    expect(binding?.preferences?.preferredServiceTier).toBe("fast");
+    expect(clientMock.setThreadModel).toHaveBeenCalledWith({
+      profile: "full-access",
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      model: "gpt-5.4",
+    });
+    expect(clientMock.setThreadServiceTier).toHaveBeenCalledWith({
+      profile: "full-access",
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      serviceTier: "fast",
+    });
+    expect(reply).toEqual({});
+    const firstCall = sendMessageTelegram.mock.calls[0] as unknown as [string, string] | undefined;
+    const text = firstCall?.[1] ?? "";
+    expect(text).toContain("Model: gpt-5.4");
+    expect(text).toContain("Fast mode: on");
+    expect(text).toContain("Permissions: Full Access");
+  });
+
+
   it("parses unicode em dash --sync for cas_rename and renames the Telegram topic", async () => {
     const { controller, clientMock, renameTopic } = await createControllerHarness();
     await (controller as any).store.upsertBinding({
@@ -2166,6 +2353,65 @@ describe("Discord controller flows", () => {
     ).toBeNull();
   });
 
+  it("preserves pending model and yolo overrides when approval completes after resume-thread selection", async () => {
+    const { controller } = await createControllerHarness();
+
+    await (controller as any).store.upsertPendingBind({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      },
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      threadTitle: "Discord Thread",
+      permissionsMode: "full-access",
+      preferences: {
+        preferredModel: "gpt-5.3-codex-spark",
+        updatedAt: Date.now(),
+      },
+      syncTopic: false,
+      notifyBound: false,
+      updatedAt: Date.now(),
+    });
+
+    await controller.handleConversationBindingResolved({
+      status: "approved",
+      binding: {
+        bindingId: "binding-1",
+        pluginId: "openclaw-codex-app-server",
+        pluginRoot: "/plugins/codex",
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+        threadId: 456,
+        boundAt: Date.now(),
+      },
+      decision: "allow-once",
+      request: {
+        summary: "Bind this conversation to Codex thread Discord Thread.",
+        conversation: {
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "123:topic:456",
+          parentConversationId: "123",
+          threadId: 456,
+        },
+      },
+    } as any);
+
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123:topic:456",
+      parentConversationId: "123",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.preferences?.preferredModel).toBe("gpt-5.3-codex-spark");
+  });
+
   it("clears pending bind state immediately when core reports the bind was denied", async () => {
     const { controller, renameTopic, sendMessageTelegram } = await createControllerHarness();
 
@@ -2293,6 +2539,71 @@ describe("Discord controller flows", () => {
         summary: expect.stringContaining("Bind this conversation to Codex thread"),
       }),
     );
+  });
+
+  it("preserves em-dash model and yolo overrides when New is chosen from the resume picker", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildTelegramCommandContext({
+        args: "—model gpt-5.3-codex-spark —yolo",
+        commandBody: "/cas_resume —model gpt-5.3-codex-spark —yolo",
+      }),
+    );
+
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    const newCallbackData = buttons?.flat().find((button: { text: string }) => button.text === "New")?.callback_data as
+      | string
+      | undefined;
+    expect(newCallbackData).toMatch(/^codexapp:/);
+
+    const editMessage = vi.fn(async (_payload: any) => {});
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: newCallbackData?.slice("codexapp:".length) },
+      requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage,
+      },
+    } as any);
+
+    const projectButtons = editMessage.mock.calls.at(-1)?.[0]?.buttons as
+      | Array<Array<{ text: string; callback_data: string }>>
+      | undefined;
+    const projectCallbackData = projectButtons?.[0]?.[0]?.callback_data;
+    expect(projectCallbackData).toMatch(/^codexapp:/);
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: projectCallbackData?.slice("codexapp:".length) },
+      requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage: vi.fn(async () => {}),
+      },
+    } as any);
+
+    expect(clientMock.startThread).toHaveBeenCalledWith({
+      profile: "full-access",
+      sessionKey: undefined,
+      workspaceDir: "/repo/openclaw",
+      model: "gpt-5.3-codex-spark",
+    });
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.preferences?.preferredModel).toBe("gpt-5.3-codex-spark");
   });
 
   it("sends the Telegram bind approval prompt only once for resume callbacks", async () => {
