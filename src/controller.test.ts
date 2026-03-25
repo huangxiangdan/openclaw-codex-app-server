@@ -7,6 +7,8 @@ import type { OpenClawPluginApi, PluginCommandContext } from "openclaw/plugin-sd
 import { CodexAppServerClient } from "./client.js";
 import { CodexPluginController } from "./controller.js";
 
+const TEST_TELEGRAM_PEER_ID = "telegram-user-1";
+
 const discordSdkState = vi.hoisted(() => ({
   buildDiscordComponentMessage: vi.fn((params: { spec: { text?: string; blocks?: unknown[] } }) => ({
     components: [params.spec.text ?? "", ...(params.spec.blocks ?? [])],
@@ -509,6 +511,107 @@ describe("Discord controller flows", () => {
     const token = callbackData.split(":").pop() ?? "";
     const callback = (controller as any).store.getCallback(token);
     expect(callback?.kind).toBe("start-new-thread");
+  });
+
+  it("collapses matching worktrees to one project root in the /cas_resume --new picker", async () => {
+    const { controller } = await createControllerHarness();
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-worktree-picker-"));
+    const canonicalWorkspaceDir = path.join(tempRoot, "github", "openclaw");
+    const worktreeA = path.join(tempRoot, ".codex", "worktrees", "7d9d", "openclaw");
+    const worktreeB = path.join(tempRoot, ".codex", "worktrees", "1999", "openclaw");
+    fs.mkdirSync(canonicalWorkspaceDir, { recursive: true });
+    fs.mkdirSync(worktreeA, { recursive: true });
+    fs.mkdirSync(worktreeB, { recursive: true });
+
+    (controller as any).client.listThreads.mockResolvedValue([
+      {
+        threadId: "thread-a",
+        title: "Feature A",
+        projectKey: worktreeA,
+        createdAt: Date.now() - 60_000,
+        updatedAt: Date.now() - 30_000,
+      },
+      {
+        threadId: "thread-b",
+        title: "Feature B",
+        projectKey: worktreeB,
+        createdAt: Date.now() - 50_000,
+        updatedAt: Date.now() - 20_000,
+      },
+    ]);
+    (controller as any).resolveProjectFolder = vi.fn(async (workspaceDir?: string) => {
+      if (!workspaceDir?.includes("/.codex/worktrees/")) {
+        return workspaceDir;
+      }
+      return canonicalWorkspaceDir;
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildTelegramCommandContext({
+        args: "--new",
+        commandBody: "/cas_resume --new",
+      }),
+    );
+
+    expect(reply.text).toContain("Choose a project for the new Codex thread");
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    expect(buttons?.[0]?.[0]?.text).toBe("openclaw (2)");
+    const callbackData = buttons?.[0]?.[0]?.callback_data as string;
+    const token = callbackData.split(":").pop() ?? "";
+    expect((controller as any).store.getCallback(token)).toEqual(expect.objectContaining({
+      kind: "start-new-thread",
+      workspaceDir: canonicalWorkspaceDir,
+    }));
+  });
+
+  it("ignores removed worktree history when the project root still exists in the /cas_resume --new picker", async () => {
+    const { controller } = await createControllerHarness();
+    const canonicalWorkspaceParent = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-root-"));
+    const canonicalWorkspaceDir = path.join(canonicalWorkspaceParent, "openclaw");
+    fs.mkdirSync(canonicalWorkspaceDir);
+
+    (controller as any).client.listThreads.mockResolvedValue([
+      {
+        threadId: "thread-root",
+        title: "Main Root",
+        projectKey: canonicalWorkspaceDir,
+        createdAt: Date.now() - 70_000,
+        updatedAt: Date.now() - 10_000,
+      },
+      {
+        threadId: "thread-stale-a",
+        title: "Removed Worktree A",
+        projectKey: path.join(canonicalWorkspaceParent, "worktrees/fd73/openclaw"),
+        createdAt: Date.now() - 60_000,
+        updatedAt: Date.now() - 30_000,
+      },
+      {
+        threadId: "thread-stale-b",
+        title: "Removed Worktree B",
+        projectKey: path.join(canonicalWorkspaceParent, "worktrees/80de/openclaw"),
+        createdAt: Date.now() - 50_000,
+        updatedAt: Date.now() - 20_000,
+      },
+    ]);
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildTelegramCommandContext({
+        args: "--new",
+        commandBody: "/cas_resume --new",
+      }),
+    );
+
+    expect(reply.text).toContain("Choose a project for the new Codex thread");
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    expect(buttons?.[0]?.[0]?.text).toBe("openclaw (3)");
+    const callbackData = buttons?.[0]?.[0]?.callback_data as string;
+    const token = callbackData.split(":").pop() ?? "";
+    expect((controller as any).store.getCallback(token)).toEqual(expect.objectContaining({
+      kind: "start-new-thread",
+      workspaceDir: canonicalWorkspaceDir,
+    }));
   });
 
   it("starts a new thread directly for /cas_resume --new <project>", async () => {
@@ -1643,6 +1746,50 @@ describe("Discord controller flows", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("shows pending default controls when the bound thread is not materialized yet", async () => {
+    const { controller, sendMessageTelegram, clientMock } = await createControllerHarness();
+    clientMock.readThreadState.mockRejectedValue(
+      new Error(
+        "thread thread-1 is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_status",
+      buildTelegramCommandContext({
+        commandBody: "/cas_status",
+        getCurrentConversationBinding: vi.fn(async () => ({ bindingId: "b1" })),
+      }),
+    );
+
+    expect(reply).toEqual({});
+    expect(sendMessageTelegram).toHaveBeenCalledTimes(1);
+    const firstCall = sendMessageTelegram.mock.calls[0] as unknown as
+      | [string, string, { buttons?: Array<Array<{ text: string; callback_data: string }>> }]
+      | undefined;
+    const text = firstCall?.[1] ?? "";
+    const buttons = firstCall?.[2]?.buttons ?? [];
+
+    expect(text).toContain("Model: unknown");
+    expect(text).toContain("saved as defaults until then");
+    expect(buttons).toHaveLength(5);
+    expect(buttons[0][0].text).toBe("Select Model");
+    expect(buttons[0][1].text).toBe("Reasoning: Default");
+    expect(buttons[1][0].text).toBe("Fast: toggle");
+    expect(buttons[1][1].text).toBe("Permissions: toggle");
+  });
+
   it("hides the fast button on status controls when the current model does not support it", async () => {
     const { controller, sendMessageTelegram } = await createControllerHarness();
     await (controller as any).store.upsertBinding({
@@ -2418,6 +2565,91 @@ describe("Discord controller flows", () => {
       | undefined;
     expect(approvedLastCall?.[0]).toBe("123");
     expect(approvedLastCall?.[1]).toContain("Binding: Discord Thread (openclaw)");
+    expect(approvedLastCall?.[2]?.messageThreadId).toBe(456);
+    expect(
+      (controller as any).store.getPendingBind({
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      }),
+    ).toBeNull();
+  });
+
+  it("still sends the bound status output when a new thread is not materialized yet", async () => {
+    const { controller, sendMessageTelegram } = await createControllerHarness();
+    (controller as any).client.readThreadState = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error("codex app server rpc error (-32600): no rollout found for thread id thread-new"),
+      )
+      .mockRejectedValueOnce(
+        new Error(
+          "codex app server rpc error (-32600): thread thread-new is not materialized yet; includeTurns is unavailable before first user message",
+        ),
+      )
+      .mockResolvedValue({
+        threadId: "thread-new",
+        threadName: "Fresh Thread",
+        cwd: "/repo/openclaw",
+        model: "openai/gpt-5.4",
+        serviceTier: "default",
+      });
+    (controller as any).client.readThreadContext = vi.fn().mockRejectedValue(
+      new Error(
+        "codex app server rpc error (-32600): thread thread-new is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+
+    await (controller as any).store.upsertPendingBind({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      },
+      threadId: "thread-new",
+      workspaceDir: "/repo/openclaw",
+      threadTitle: "Fresh Thread",
+      syncTopic: false,
+      notifyBound: true,
+      updatedAt: Date.now(),
+    });
+
+    await expect(
+      controller.handleConversationBindingResolved({
+        status: "approved",
+        binding: {
+          bindingId: "binding-1",
+          pluginId: "openclaw-codex-app-server",
+          pluginRoot: "/plugins/codex",
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "123:topic:456",
+          parentConversationId: "123",
+          threadId: 456,
+          boundAt: Date.now(),
+        },
+        decision: "allow-once",
+        request: {
+          summary: "Bind this conversation to Codex thread Fresh Thread.",
+          conversation: {
+            channel: "telegram",
+            accountId: "default",
+            conversationId: "123:topic:456",
+            parentConversationId: "123",
+            threadId: 456,
+          },
+        },
+      } as any),
+    ).resolves.toBeUndefined();
+
+    const approvedLastCall = sendMessageTelegram.mock.calls.at(-1) as
+      | [string, string, { buttons?: Array<Array<{ text: string }>>; messageThreadId?: number }]
+      | undefined;
+    expect(approvedLastCall?.[0]).toBe("123");
+    expect(approvedLastCall?.[1]).toContain("Binding: Fresh Thread (openclaw)");
+    expect(approvedLastCall?.[1]).toContain("Thread: thread-new");
     expect(approvedLastCall?.[2]?.messageThreadId).toBe(456);
     expect(
       (controller as any).store.getPendingBind({
@@ -3328,7 +3560,7 @@ describe("Discord controller flows", () => {
       {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       {
         mediaUrl: attachmentPath,
@@ -3337,7 +3569,7 @@ describe("Discord controller flows", () => {
 
     expect(sent).toBe(true);
     expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
+      TEST_TELEGRAM_PEER_ID,
       "",
       expect.objectContaining({
         mediaUrl: attachmentPath,
@@ -3559,7 +3791,7 @@ describe("Discord controller flows", () => {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         binding: null,
         workspaceDir: "/repo/openclaw",
@@ -3612,13 +3844,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3633,7 +3865,7 @@ describe("Discord controller flows", () => {
     await flushAsyncWork();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
+      TEST_TELEGRAM_PEER_ID,
       "Codex authentication failed on this machine. Run `codex logout` and `codex login`, then try again.",
       expect.anything(),
     );
@@ -3661,7 +3893,7 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: null,
       workspaceDir: "/repo/openclaw",
@@ -3670,11 +3902,13 @@ describe("Discord controller flows", () => {
     });
 
     await flushAsyncWork();
-    expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
-      "Codex authentication failed on this machine. Run `codex logout` and `codex login`, then try again.",
-      expect.anything(),
-    );
+    await vi.waitFor(() => {
+      expect(sendMessageTelegram).toHaveBeenCalledWith(
+        TEST_TELEGRAM_PEER_ID,
+        "Codex authentication failed on this machine. Run `codex logout` and `codex login`, then try again.",
+        expect.anything(),
+      );
+    });
   });
 
   it("surfaces explicit failed turns as auth failures when the terminal error is unauthorized", async () => {
@@ -3701,13 +3935,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3720,11 +3954,13 @@ describe("Discord controller flows", () => {
     });
 
     await flushAsyncWork();
-    expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
-      "Codex authentication failed on this machine. Run `codex logout` and `codex login`, then try again.",
-      expect.anything(),
-    );
+    await vi.waitFor(() => {
+      expect(sendMessageTelegram).toHaveBeenCalledWith(
+        TEST_TELEGRAM_PEER_ID,
+        "Codex authentication failed on this machine. Run `codex logout` and `codex login`, then try again.",
+        expect.anything(),
+      );
+    });
     expect(clientMock.readAccount).toHaveBeenCalledWith({
       profile: "default",
       sessionKey: "session-1",
@@ -3752,13 +3988,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3807,13 +4043,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3862,13 +4098,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3928,13 +4164,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3948,7 +4184,7 @@ describe("Discord controller flows", () => {
 
     await flushAsyncWork();
     expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
+      TEST_TELEGRAM_PEER_ID,
       "Codex completed without a text reply.",
       expect.anything(),
     );
@@ -3974,13 +4210,13 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "telegram",
         accountId: "default",
-        conversationId: "8460800771",
+        conversationId: TEST_TELEGRAM_PEER_ID,
       },
       binding: {
         conversation: {
           channel: "telegram",
           accountId: "default",
-          conversationId: "8460800771",
+          conversationId: TEST_TELEGRAM_PEER_ID,
         },
         sessionKey: "session-1",
         threadId: "thread-1",
@@ -3994,7 +4230,7 @@ describe("Discord controller flows", () => {
 
     await flushAsyncWork();
     expect(sendMessageTelegram).toHaveBeenCalledWith(
-      "8460800771",
+      TEST_TELEGRAM_PEER_ID,
       "Cancelled the Codex approval request.",
       expect.anything(),
     );
@@ -4109,6 +4345,61 @@ describe("Discord controller flows", () => {
       },
     } as any);
 
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.preferences?.preferredServiceTier).toBe("fast");
+    expect(editMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("Fast mode: on"),
+        buttons: expect.any(Array),
+      }),
+    );
+  });
+
+  it("stores fast mode as a pending default before the thread is materialized", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+    clientMock.readThreadState.mockRejectedValue(
+      new Error(
+        "thread thread-1 is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    const callback = await (controller as any).store.putCallback({
+      kind: "toggle-fast",
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+    });
+    const editMessage = vi.fn(async (_payload: any) => {});
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: callback.token },
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage,
+      },
+    } as any);
+
+    expect(clientMock.setThreadServiceTier).not.toHaveBeenCalled();
     const binding = (controller as any).store.getBinding({
       channel: "telegram",
       accountId: "default",
@@ -4282,6 +4573,63 @@ describe("Discord controller flows", () => {
     expect(editMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         text: expect.stringContaining("Permissions: Default"),
+      }),
+    );
+  });
+
+  it("stores permissions mode as a pending default before the thread is materialized", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+    clientMock.readThreadState.mockRejectedValue(
+      new Error(
+        "thread thread-1 is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      permissionsMode: "default",
+      updatedAt: Date.now(),
+    });
+    const callback = await (controller as any).store.putCallback({
+      kind: "toggle-permissions",
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+    });
+    const editMessage = vi.fn(async (_payload: any) => {});
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: callback.token },
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage,
+      },
+    } as any);
+
+    expect(clientMock.setThreadPermissions).not.toHaveBeenCalled();
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.permissionsMode).toBe("full-access");
+    expect(binding?.pendingPermissionsMode).toBeUndefined();
+    expect(editMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("Permissions: Full Access"),
+        buttons: expect.any(Array),
       }),
     );
   });
@@ -4598,6 +4946,53 @@ describe("Discord controller flows", () => {
         kind: "refresh-status",
       }),
     );
+  });
+
+  it("shows reasoning-picker buttons for an unmaterialized thread using the current default model", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+    clientMock.readThreadState.mockRejectedValue(
+      new Error(
+        "thread thread-1 is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    const callback = await (controller as any).store.putCallback({
+      kind: "show-reasoning-picker",
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+    });
+    const editMessage = vi.fn(async (_payload: any) => {});
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: callback.token, messageId: 41, chatId: "123" },
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage,
+      },
+    } as any);
+
+    const lastCall = editMessage.mock.calls.at(-1)?.[0] as any;
+    expect(lastCall?.text).toContain("Binding:");
+    expect(lastCall?.text).toContain("saved as defaults until then");
+    expect(lastCall?.buttons?.some((row: Array<{ text: string }>) => row[0]?.text === "High")).toBe(true);
+    expect(lastCall?.buttons?.some((row: Array<{ text: string }>) => row[0]?.text === "Cancel")).toBe(true);
   });
 
   it("shows the model picker in a separate message using the saved preferred model when the thread snapshot is stale", async () => {
@@ -5119,6 +5514,63 @@ describe("Discord controller flows", () => {
       },
     } as any);
 
+    const binding = (controller as any).store.getBinding({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+    });
+    expect(binding?.preferences?.preferredModel).toBe("openai/gpt-5.3");
+    expect(editMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("Model: openai/gpt-5.3"),
+        buttons: expect.any(Array),
+      }),
+    );
+  });
+
+  it("stores the selected model as a pending default before the thread is materialized", async () => {
+    const { controller, clientMock } = await createControllerHarness();
+    clientMock.readThreadState.mockRejectedValue(
+      new Error(
+        "thread thread-1 is not materialized yet; includeTurns is unavailable before first user message",
+      ),
+    );
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    const callback = await (controller as any).store.putCallback({
+      kind: "set-model",
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      },
+      model: "openai/gpt-5.3",
+      returnToStatus: true,
+    });
+    const editMessage = vi.fn(async (_payload: any) => {});
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123",
+      callback: { payload: callback.token },
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage,
+      },
+    } as any);
+
+    expect(clientMock.setThreadModel).not.toHaveBeenCalled();
     const binding = (controller as any).store.getBinding({
       channel: "telegram",
       accountId: "default",

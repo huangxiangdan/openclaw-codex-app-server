@@ -571,7 +571,12 @@ function applyBindingPreferencesToThreadState(
     sandbox: permissions.sandbox || baseState.sandbox,
     reasoningEffort: preferredReasoningEffort || baseState.reasoningEffort,
   };
-  if (!modelSupportsFast(nextState.model) && normalizeServiceTier(nextState.serviceTier) === "fast") {
+  const normalizedModel = nextState.model?.trim();
+  if (
+    normalizedModel &&
+    !modelSupportsFast(normalizedModel) &&
+    normalizeServiceTier(nextState.serviceTier) === "fast"
+  ) {
     nextState.serviceTier = "default";
   }
   return nextState;
@@ -1769,12 +1774,10 @@ export class CodexPluginController {
       if (!binding || !conversation) {
         return { text: "Bind this conversation to Codex before changing status settings." };
       }
-      const { effectiveState } = await this.readEffectiveThreadState(binding);
+      const { state: currentThreadState, effectiveState } = await this.readEffectiveThreadState(binding);
       const effectiveModel =
         parsed.requestedModel?.trim() ||
-        effectiveState?.model?.trim() ||
-        binding.preferences?.preferredModel?.trim() ||
-        this.settings.defaultModel;
+        (await this.resolveCurrentModelHint(binding, effectiveState));
       if (parsed.requestedFast && !modelSupportsFast(effectiveModel)) {
         return {
           text: `Fast mode is unavailable for ${effectiveModel ?? "the current model"}. Use a GPT-5.4+ model to enable it.`,
@@ -1813,10 +1816,13 @@ export class CodexPluginController {
                 currentPermissionsMode,
                 targetPermissionsMode,
               )
-            : await this.migrateBindingPermissionsMode(updatedBindingBase, targetPermissionsMode)
+            : currentThreadState
+              ? await this.migrateBindingPermissionsMode(updatedBindingBase, targetPermissionsMode)
+              : await this.persistBindingPermissionsMode(updatedBindingBase, targetPermissionsMode)
           : (await this.store.upsertBinding(updatedBindingBase), updatedBindingBase);
       await this.reconcileThreadConfiguration(binding, {
-        applyPermissions: !(active && targetPermissionsMode !== currentPermissionsMode),
+        applyPermissions:
+          Boolean(currentThreadState) && !(active && targetPermissionsMode !== currentPermissionsMode),
         modelFallback: effectiveModel,
         context: "apply status overrides",
       });
@@ -1870,6 +1876,27 @@ export class CodexPluginController {
       state,
       effectiveState: desired.effectiveState,
     };
+  }
+
+  private async resolveCurrentModelHint(
+    binding: StoredBinding,
+    effectiveState: ThreadState | undefined,
+  ): Promise<string | undefined> {
+    const explicitModel =
+      effectiveState?.model?.trim() || binding.preferences?.preferredModel?.trim() || undefined;
+    if (explicitModel) {
+      return explicitModel;
+    }
+    const configuredDefault = this.settings.defaultModel?.trim() || undefined;
+    try {
+      const models = await this.client.listModels({
+        profile: this.getPermissionsMode(binding),
+        sessionKey: binding.sessionKey,
+      });
+      return models.find((model) => model.current)?.id?.trim() || configuredDefault;
+    } catch {
+      return configuredDefault;
+    }
   }
 
   private resolveRequestedPermissionsMode(
@@ -1987,8 +2014,7 @@ export class CodexPluginController {
     binding: StoredBinding,
   ): Promise<PluginInteractiveButtons> {
     const { effectiveState } = await this.readEffectiveThreadState(binding);
-    const currentModel =
-      effectiveState?.model?.trim() || binding.preferences?.preferredModel?.trim() || undefined;
+    const currentModel = await this.resolveCurrentModelHint(binding, effectiveState);
     const currentReasoning = normalizeReasoningEffort(
       effectiveState?.reasoningEffort ?? binding.preferences?.preferredReasoningEffort,
     );
@@ -2030,18 +2056,19 @@ export class CodexPluginController {
         conversation,
       }),
     ]);
-    const buttons: PluginInteractiveButtons = [
-      [
-        {
-          text: "Select Model",
-          callback_data: `${INTERACTIVE_NAMESPACE}:${showModelPicker.token}`,
-        },
-        {
-          text: `Reasoning: ${formatReasoningEffortLabel(currentReasoning)}`,
-          callback_data: `${INTERACTIVE_NAMESPACE}:${showReasoningPicker.token}`,
-        },
-      ],
+    const topRow: Array<{ text: string; callback_data: string }> = [
+      {
+        text: "Select Model",
+        callback_data: `${INTERACTIVE_NAMESPACE}:${showModelPicker.token}`,
+      },
     ];
+    if (currentModel) {
+      topRow.push({
+        text: `Reasoning: ${formatReasoningEffortLabel(currentReasoning)}`,
+        callback_data: `${INTERACTIVE_NAMESPACE}:${showReasoningPicker.token}`,
+      });
+    }
+    const buttons: PluginInteractiveButtons = [topRow];
     if (modelSupportsFast(currentModel)) {
       const toggleFast = await this.store.putCallback({
         kind: "toggle-fast",
@@ -2218,8 +2245,14 @@ export class CodexPluginController {
     },
   ): Promise<PickerRender> {
     const { state, effectiveState } = await this.readEffectiveThreadState(binding);
-    const model =
-      effectiveState?.model?.trim() || binding.preferences?.preferredModel?.trim() || undefined;
+    const model = await this.resolveCurrentModelHint(binding, effectiveState);
+    if (!model) {
+      return {
+        text:
+          "Select a model first. Reasoning choices will also become available after Codex materializes the thread.",
+        buttons: [],
+      };
+    }
     const supported = getSupportedReasoningEfforts(model);
     const currentReasoning = normalizeReasoningEffort(
       effectiveState?.reasoningEffort ?? binding.preferences?.preferredReasoningEffort,
@@ -2253,11 +2286,16 @@ export class CodexPluginController {
       },
     ]);
     const currentText = currentReasoning ? formatReasoningEffortLabel(currentReasoning) : "Default";
+    const pendingNote =
+      !state
+        ? "This thread is not materialized yet. Your choice will be saved as the default for the first turn."
+        : "";
     return {
       text:
         supported.length === 0
-          ? `Reasoning selection is unavailable for ${model ?? "this model"}.`
+          ? `Reasoning selection is unavailable for ${model}.`
           : [
+              pendingNote,
               `Current reasoning: ${currentText}`,
               model ? `Model: ${model}` : "",
               "Available reasoning levels:",
@@ -3840,18 +3878,19 @@ export class CodexPluginController {
       },
       filterProjectsOnly: true,
     });
-    const exactProjectName = listProjects(threads).filter(
+    const normalizedThreads = await this.normalizeNewThreadProjectThreads(threads);
+    const exactProjectName = listProjects(normalizedThreads).filter(
       (project) => project.name.trim().toLowerCase() === query.toLowerCase(),
     );
     if (exactProjectName.length === 1) {
-      const workspaces = listWorkspaceChoices(threads, exactProjectName[0]?.name);
+      const workspaces = listWorkspaceChoices(normalizedThreads, exactProjectName[0]?.name);
       return workspaces.length === 1 ? workspaces[0]?.workspaceDir ?? null : null;
     }
-    const candidates = listProjects(threads, query);
+    const candidates = listProjects(normalizedThreads, query);
     if (candidates.length !== 1) {
       return null;
     }
-    const workspaces = listWorkspaceChoices(threads, candidates[0]?.name);
+    const workspaces = listWorkspaceChoices(normalizedThreads, candidates[0]?.name);
     return workspaces.length === 1 ? workspaces[0]?.workspaceDir ?? null : null;
   }
 
@@ -3879,6 +3918,60 @@ export class CodexPluginController {
       workspaceDir,
       threads: filterThreadsByProjectName(threads, params.projectName),
     };
+  }
+
+  private async normalizeNewThreadProjectThreads<
+    T extends { projectKey?: string; createdAt?: number; updatedAt?: number },
+  >(threads: T[]): Promise<T[]> {
+    const projectFolderByWorkspace = new Map<string, Promise<string | undefined>>();
+    const getResolvedProjectFolder = (workspaceDir: string): Promise<string | undefined> => {
+      let projectFolder = projectFolderByWorkspace.get(workspaceDir);
+      if (!projectFolder) {
+        projectFolder = this.resolveProjectFolder(workspaceDir);
+        projectFolderByWorkspace.set(workspaceDir, projectFolder);
+      }
+      return projectFolder;
+    };
+    const liveProjectRootsByName = new Map<string, Set<string>>();
+
+    for (const thread of threads) {
+      const workspaceDir = thread.projectKey?.trim();
+      const projectName = getProjectName(workspaceDir)?.trim().toLowerCase();
+      if (!workspaceDir || !projectName || !existsSync(workspaceDir)) {
+        continue;
+      }
+      const resolvedProjectRoot = this.isWorktreePath(workspaceDir)
+        ? ((await getResolvedProjectFolder(workspaceDir))?.trim() || workspaceDir)
+        : workspaceDir;
+      const projectRoots = liveProjectRootsByName.get(projectName) ?? new Set<string>();
+      projectRoots.add(resolvedProjectRoot);
+      liveProjectRootsByName.set(projectName, projectRoots);
+    }
+
+    const normalizedThreads: T[] = [];
+    for (const thread of threads) {
+      const workspaceDir = thread.projectKey?.trim();
+      if (!workspaceDir || !this.isWorktreePath(workspaceDir)) {
+        normalizedThreads.push(thread);
+        continue;
+      }
+      if (existsSync(workspaceDir)) {
+        normalizedThreads.push({
+          ...thread,
+          projectKey: (await getResolvedProjectFolder(workspaceDir))?.trim() || workspaceDir,
+        });
+        continue;
+      }
+      const projectName = getProjectName(workspaceDir)?.trim().toLowerCase();
+      const liveProjectRoots = projectName ? liveProjectRootsByName.get(projectName) : undefined;
+      if (liveProjectRoots?.size === 1) {
+        normalizedThreads.push({
+          ...thread,
+          projectKey: [...liveProjectRoots][0],
+        });
+      }
+    }
+    return normalizedThreads;
   }
 
   private async buildThreadPickerButtons(params: {
@@ -4105,13 +4198,15 @@ export class CodexPluginController {
       parsed,
       filterProjectsOnly: true,
     });
+    const normalizedThreads =
+      action === "start-new-thread" ? await this.normalizeNewThreadProjectThreads(threads) : threads;
     const buttons: PluginInteractiveButtons = [];
-    const projectOptions = paginateItems(listProjects(threads, parsed.query), page);
+    const projectOptions = paginateItems(listProjects(normalizedThreads, parsed.query), page);
     for (const option of projectOptions.items) {
       const callback =
         action === "start-new-thread"
           ? (() => {
-              const workspaces = listWorkspaceChoices(threads, option.name);
+              const workspaces = listWorkspaceChoices(normalizedThreads, option.name);
               if (workspaces.length === 1) {
                 return this.store.putCallback({
                   kind: "start-new-thread",
@@ -4266,7 +4361,8 @@ export class CodexPluginController {
       projectName,
       filterProjectsOnly: true,
     });
-    const workspaceOptions = paginateItems(listWorkspaceChoices(threads, projectName), page);
+    const normalizedThreads = await this.normalizeNewThreadProjectThreads(threads);
+    const workspaceOptions = paginateItems(listWorkspaceChoices(normalizedThreads, projectName), page);
     const buttons: PluginInteractiveButtons = [];
     for (const option of workspaceOptions.items) {
       const callback = await this.store.putCallback({
@@ -4698,22 +4794,31 @@ export class CodexPluginController {
       }
       const profile = this.getPermissionsMode(binding);
       const { state: threadState, effectiveState } = await this.readEffectiveThreadState(binding);
-      const currentModel =
-        effectiveState?.model?.trim() || binding.preferences?.preferredModel?.trim() || undefined;
+      const currentModel = await this.resolveCurrentModelHint(binding, effectiveState);
       if (!modelSupportsFast(currentModel)) {
         await responders.reply(
           `Fast mode is unavailable for ${currentModel ?? "the current model"}. Use a GPT-5.4+ model to enable it.`,
         );
         return;
       }
-      const currentTier = normalizeServiceTier(threadState?.serviceTier);
+      const currentTier = normalizeServiceTier(
+        effectiveState?.serviceTier ?? threadState?.serviceTier,
+      );
       const nextTier = currentTier === "fast" ? null : "fast";
-      const updatedState = await this.client.setThreadServiceTier({
-        profile,
-        sessionKey: binding.sessionKey,
-        threadId: binding.threadId,
-        serviceTier: nextTier,
-      });
+      let updatedState = threadState;
+      if (threadState) {
+        updatedState = await this.client.setThreadServiceTier({
+          profile,
+          sessionKey: binding.sessionKey,
+          threadId: binding.threadId,
+          serviceTier: nextTier,
+        }).catch((error) => {
+          if (isMissingThreadError(error)) {
+            return threadState;
+          }
+          throw error;
+        });
+      }
       const preferredServiceTier = preferredServiceTierFromRequest(nextTier);
       const updatedBinding: StoredBinding = {
         ...binding,
@@ -4853,6 +4958,7 @@ export class CodexPluginController {
         return;
       }
       const active = this.activeRuns.get(buildConversationKey(callback.conversation));
+      const { state: currentThreadState } = await this.readEffectiveThreadState(binding);
       const updatedBindingBase: StoredBinding = {
         ...binding,
         permissionsMode: active ? currentProfile : nextProfile,
@@ -4861,7 +4967,9 @@ export class CodexPluginController {
       };
       const updatedBinding = active
         ? await this.persistBindingPermissionsMode(updatedBindingBase, currentProfile, nextProfile)
-        : await this.migrateBindingPermissionsMode(updatedBindingBase, nextProfile);
+        : currentThreadState
+          ? await this.migrateBindingPermissionsMode(updatedBindingBase, nextProfile)
+          : await this.persistBindingPermissionsMode(updatedBindingBase, nextProfile);
       this.api.logger.debug?.(
         `codex status control toggle-permissions conversation=${this.formatConversationForLog(callback.conversation)} currentProfile=${currentProfile} requestedProfile=${nextProfile} activeRun=${active?.mode ?? "none"} ${formatBindingPreferencesForLog(updatedBinding)}`,
       );
@@ -5111,26 +5219,35 @@ export class CodexPluginController {
         return;
       }
       const profile = this.getPermissionsMode(binding);
-      const state = await this.client.setThreadModel({
-        profile,
-        sessionKey: binding.sessionKey,
-        threadId: binding.threadId,
-        model: callback.model,
-      });
+      const { state: threadState } = await this.readEffectiveThreadState(binding);
+      let state = threadState;
+      if (threadState) {
+        state = await this.client.setThreadModel({
+          profile,
+          sessionKey: binding.sessionKey,
+          threadId: binding.threadId,
+          model: callback.model,
+        }).catch((error) => {
+          if (isMissingThreadError(error)) {
+            return threadState;
+          }
+          throw error;
+        });
+      }
       const nextPreferredServiceTier = modelSupportsFast(callback.model)
         ? binding.preferences?.preferredServiceTier ?? null
         : "default";
-      const nextState =
-        !modelSupportsFast(callback.model) && normalizeServiceTier(state.serviceTier) === "fast"
-          ? await this.client
-              .setThreadServiceTier({
-                profile,
-                sessionKey: binding.sessionKey,
-                threadId: binding.threadId,
-                serviceTier: null,
-              })
-              .catch(() => ({ ...state, serviceTier: "default" }))
-          : state;
+      let nextState = state;
+      if (!modelSupportsFast(callback.model) && normalizeServiceTier(state?.serviceTier) === "fast") {
+        nextState = await this.client
+          .setThreadServiceTier({
+            profile,
+            sessionKey: binding.sessionKey,
+            threadId: binding.threadId,
+            serviceTier: null,
+          })
+          .catch(() => ({ ...state, serviceTier: "default" } as ThreadState));
+      }
       const updatedBinding: StoredBinding = {
         ...binding,
         preferences: {
@@ -5181,7 +5298,7 @@ export class CodexPluginController {
         return;
       }
       await responders.clear().catch(() => undefined);
-      await responders.reply(`Codex model set to ${nextState.model || callback.model}.`);
+      await responders.reply(`Codex model set to ${nextState?.model || callback.model}.`);
       return;
     }
     if (callback.kind === "reply-text") {
@@ -5790,20 +5907,34 @@ export class CodexPluginController {
       this.resolveProjectFolder(binding?.workspaceDir || workspaceDir),
     ]);
     const effectiveThreadState = buildDesiredThreadConfiguration(threadState, binding).effectiveState;
+    const displayThreadState =
+      effectiveThreadState ??
+      (binding
+        ? {
+            threadId: binding.threadId,
+            threadName: binding.threadTitle,
+            cwd: binding.workspaceDir,
+          }
+        : undefined);
+    const threadNote =
+      binding && !threadState
+        ? "Live thread details are unavailable until Codex materializes the thread, usually after the first user message. Model, reasoning, and fast-mode changes made here are saved as defaults until then."
+        : undefined;
     this.api.logger.debug?.(
-      `codex status snapshot bindingActive=${bindingActive ? "yes" : "no"} activeRun=${activeRun?.mode ?? "none"} boundThread=${binding?.threadId ?? "<none>"} raw=${formatThreadStateForLog(threadState)} effective=${formatThreadStateForLog(effectiveThreadState)} ${formatBindingPreferencesForLog(binding)} threadCwd=${threadState?.cwd?.trim() || "<none>"}`,
+      `codex status snapshot bindingActive=${bindingActive ? "yes" : "no"} activeRun=${activeRun?.mode ?? "none"} boundThread=${binding?.threadId ?? "<none>"} raw=${formatThreadStateForLog(threadState)} effective=${formatThreadStateForLog(displayThreadState)} ${formatBindingPreferencesForLog(binding)} threadCwd=${displayThreadState?.cwd?.trim() || "<none>"}`,
     );
 
     return formatCodexStatusText({
       pluginVersion: PLUGIN_VERSION,
-      threadState: effectiveThreadState,
+      threadState: displayThreadState,
       account,
       rateLimits: limits,
       bindingActive,
       projectFolder,
-      worktreeFolder: threadState?.cwd?.trim() || binding?.workspaceDir || workspaceDir,
+      worktreeFolder: displayThreadState?.cwd?.trim() || binding?.workspaceDir || workspaceDir,
       contextUsage: binding?.contextUsage,
       planMode: bindingActive ? activeRun?.mode === "plan" : undefined,
+      threadNote,
       permissionNote:
         pendingProfile && activeRun
           ? buildPendingPermissionsMigrationNote(pendingProfile)
