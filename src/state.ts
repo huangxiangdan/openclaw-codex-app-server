@@ -30,6 +30,7 @@ type PutCallbackInput =
       kind: "resume-thread";
       conversation: ConversationTarget;
       threadId: string;
+      threadTitle?: string;
       workspaceDir: string;
       syncTopic?: boolean;
       requestedModel?: string;
@@ -465,6 +466,7 @@ export class PluginStateStore {
             kind: "resume-thread",
             conversation: callback.conversation,
             threadId: callback.threadId,
+            threadTitle: callback.threadTitle,
             workspaceDir: callback.workspaceDir,
             syncTopic: callback.syncTopic,
             requestedModel: callback.requestedModel,

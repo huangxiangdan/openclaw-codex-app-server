@@ -15,6 +15,7 @@ import type {
   ThreadSummary,
   TurnResult,
 } from "./types.js";
+import { getThreadDisplayTitle } from "./thread-display.js";
 import { getProjectName } from "./thread-picker.js";
 
 function formatDateAge(value?: number): string | undefined {
@@ -82,7 +83,7 @@ function formatMaskedEmail(email: string): string {
 }
 
 function formatThreadButtonTitle(thread: ThreadSummary): string {
-  return thread.title?.trim() || thread.threadId;
+  return getThreadDisplayTitle(thread);
 }
 
 function formatCompactAge(value?: number): string | undefined {
@@ -134,7 +135,7 @@ export function formatThreadPicker(threads: ThreadSummary[]): string {
     ...threads.slice(0, 10).map((thread, index) => {
       const age = formatDateAge(thread.updatedAt ?? thread.createdAt);
       const parts = [
-        `${index + 1}. ${thread.title || thread.threadId}`,
+        `${index + 1}. ${getThreadDisplayTitle(thread)}`,
         age ? `updated ${age}` : "",
         thread.projectKey ? `cwd ${thread.projectKey}` : "",
       ].filter(Boolean);
@@ -525,6 +526,7 @@ export function formatCodexContextUsageSnapshot(
 export function formatCodexStatusText(params: {
   pluginVersion?: string;
   threadState?: ThreadState;
+  bindingThreadTitle?: string;
   account?: AccountSummary | null;
   rateLimits: RateLimitSummary[];
   projectFolder?: string;
@@ -536,7 +538,9 @@ export function formatCodexStatusText(params: {
   threadNote?: string;
 }): string {
   const lines = [];
-  const bindingThreadName = params.threadState?.threadName?.trim();
+  const bindingThreadName =
+    params.threadState?.threadName?.trim() ||
+    params.bindingThreadTitle?.trim();
   const bindingProjectName = getProjectName(params.projectFolder ?? params.worktreeFolder);
   lines.push(
     params.bindingActive

@@ -15,6 +15,7 @@ import {
   formatMcpServers,
   formatModels,
   formatSkills,
+  formatThreadPicker,
   formatThreadPickerIntro,
   formatThreadButtonLabel,
   parseCodexReviewOutput,
@@ -67,6 +68,48 @@ describe("formatThreadButtonLabel", () => {
         includeProjectSuffix: true,
       }),
     ).toBe("019cbef1-376b-7312-98aa-24488c7499d4 (workspace)");
+  });
+
+  it("falls back to the thread summary when the name is missing", () => {
+    expect(
+      formatThreadButtonLabel({
+        thread: {
+          threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+          summary: "What is wrong with this layout?",
+          projectKey: "/workspace/openclaw-app-server",
+        },
+        includeProjectSuffix: false,
+      }),
+    ).toBe("What is wrong with this layout?");
+  });
+
+  it("truncates long summary fallbacks before rendering", () => {
+    const label = formatThreadButtonLabel({
+      thread: {
+        threadId: "thread-long",
+        summary:
+          "This is a very long first user prompt that should not become an enormous unnamed thread label in the resume picker UI",
+      },
+      includeProjectSuffix: false,
+    });
+
+    expect(label).toContain("This is a very long first user");
+    expect(label.length).toBeLessThanOrEqual(72);
+    expect(label).toContain("...");
+  });
+});
+
+describe("formatThreadPicker", () => {
+  it("uses the preview summary before falling back to the thread id", () => {
+    expect(
+      formatThreadPicker([
+        {
+          threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+          summary: "What is wrong with this layout?",
+          projectKey: "/workspace/openclaw-app-server",
+        },
+      ]),
+    ).toContain("1. What is wrong with this layout?");
   });
 });
 
@@ -195,6 +238,25 @@ describe("formatCodexStatusText", () => {
     });
 
     expect(text).toContain("Context usage: 139k / 258k tokens used (54% full)");
+  });
+
+  it("falls back to the bound thread title when status has no live thread name", () => {
+    const text = formatCodexStatusText({
+      bindingActive: true,
+      threadState: {
+        threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+        model: "gpt-5.4",
+        modelProvider: "openai",
+        reasoningEffort: "high",
+        cwd: "/repo/openclaw-app-server",
+      },
+      projectFolder: "/repo/openclaw-app-server",
+      worktreeFolder: "/repo/openclaw-app-server",
+      rateLimits: [],
+      bindingThreadTitle: "What is wrong with this layout?",
+    });
+
+    expect(text).toContain("Binding: What is wrong with this layout? (openclaw-app-server)");
   });
 
   it("shows plan mode on when the bound conversation has an active plan run", () => {

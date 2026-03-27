@@ -25,6 +25,7 @@ import {
 } from "openclaw/plugin-sdk/discord";
 import { resolvePluginSettings, resolveWorkspaceDir } from "./config.js";
 import { CodexAppServerModeClient, type ActiveCodexRun, isMissingThreadError } from "./client.js";
+import { getThreadDisplayTitle } from "./thread-display.js";
 import {
   formatAccountSummary,
   formatBinding,
@@ -1996,7 +1997,7 @@ export class CodexPluginController {
           serviceWorkspaceDir: this.serviceWorkspaceDir,
       }),
       permissionsMode: targetPermissionsMode,
-      threadTitle: selection.thread.title,
+      threadTitle: getThreadDisplayTitle(selection.thread),
       syncTopic: parsed.syncTopic,
       preferences,
       notifyBound: true,
@@ -2009,7 +2010,7 @@ export class CodexPluginController {
     }
     if (parsed.syncTopic) {
       const syncedName = buildResumeTopicName({
-        title: selection.thread.title,
+        title: getThreadDisplayTitle(selection.thread),
         projectKey: selection.thread.projectKey,
         threadId: selection.thread.threadId,
       });
@@ -4278,6 +4279,7 @@ export class CodexPluginController {
         kind: "resume-thread",
         conversation: params.conversation,
         threadId: thread.threadId,
+        threadTitle: getThreadDisplayTitle(thread),
         workspaceDir: thread.projectKey?.trim() || this.settings.defaultWorkspaceDir || process.cwd(),
         syncTopic: params.parsed.syncTopic,
         requestedModel: params.parsed.requestedModel,
@@ -4876,7 +4878,7 @@ export class CodexPluginController {
           threadId: callback.threadId,
           workspaceDir: threadState?.cwd?.trim() || callback.workspaceDir,
           permissionsMode: profile,
-          threadTitle: threadState?.threadName,
+          threadTitle: threadState?.threadName?.trim() || callback.threadTitle,
           syncTopic: callback.syncTopic,
           preferences,
           notifyBound: true,
@@ -4896,7 +4898,7 @@ export class CodexPluginController {
       await this.store.removeCallback(callback.token);
       if (callback.syncTopic) {
         const syncedName = buildResumeTopicName({
-          title: threadState?.threadName,
+          title: threadState?.threadName?.trim() || callback.threadTitle,
           projectKey: threadState?.cwd?.trim() || callback.workspaceDir,
           threadId: callback.threadId,
         });
@@ -5872,7 +5874,9 @@ export class CodexPluginController {
       workspaceDir: params.workspaceDir,
       permissionsMode: params.permissionsMode ?? existing?.permissionsMode ?? "default",
       pendingPermissionsMode: params.pendingPermissionsMode ?? existing?.pendingPermissionsMode,
-      threadTitle: params.threadTitle,
+      threadTitle:
+        params.threadTitle ??
+        (existing?.threadId === params.threadId ? existing.threadTitle : undefined),
       pinnedBindingMessage: existing?.pinnedBindingMessage,
       contextUsage: existing?.contextUsage,
       preferences: params.preferences ?? existing?.preferences,
@@ -6230,6 +6234,7 @@ export class CodexPluginController {
     return formatCodexStatusText({
       pluginVersion: PLUGIN_VERSION,
       threadState: displayThreadState,
+      bindingThreadTitle: binding?.threadTitle,
       account,
       rateLimits: limits,
       bindingActive,
