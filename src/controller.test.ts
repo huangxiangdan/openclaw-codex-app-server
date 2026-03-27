@@ -2805,6 +2805,77 @@ describe("Discord controller flows", () => {
     );
   });
 
+  it("keeps preview-derived thread titles through resume callback binding when core has no live name", async () => {
+    const { controller, clientMock, renameTopic, sendMessageTelegram } = await createControllerHarness();
+    clientMock.readThreadState.mockResolvedValue({
+      threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+      model: "gpt-5.4",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+      cwd: "/repo/openclaw-app-server",
+      serviceTier: "default",
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+    const callback = await (controller as any).store.putCallback({
+      kind: "resume-thread",
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      },
+      threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+      threadTitle: "What is wrong with this layout?",
+      workspaceDir: "/repo/openclaw-app-server",
+      syncTopic: true,
+    });
+
+    await controller.handleTelegramInteractive({
+      channel: "telegram",
+      accountId: "default",
+      conversationId: "123:topic:456",
+      parentConversationId: "123",
+      threadId: 456,
+      requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
+      callback: {
+        payload: callback.token,
+      },
+      respond: {
+        clearButtons: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+        editMessage: vi.fn(async () => {}),
+      },
+    } as any);
+
+    expect(renameTopic).toHaveBeenCalledWith(
+      "123",
+      456,
+      "What is wrong with this layout? (openclaw-app-server)",
+      expect.objectContaining({ accountId: "default" }),
+    );
+    expect(
+      sendMessageTelegram.mock.calls.some((call) =>
+        String((call as unknown as [string, string])[1]).includes(
+          "Binding: What is wrong with this layout? (openclaw-app-server)",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      (controller as any).store.getBinding({
+        channel: "telegram",
+        accountId: "default",
+        conversationId: "123:topic:456",
+        parentConversationId: "123",
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        threadId: "019d2cbc-9fee-7862-8d02-683dfef71851",
+        threadTitle: "What is wrong with this layout?",
+      }),
+    );
+  });
+
   it("dispatches start-new-thread callbacks through thread creation and binding", async () => {
     const { controller, clientMock } = await createControllerHarness();
     const callback = await (controller as any).store.putCallback({

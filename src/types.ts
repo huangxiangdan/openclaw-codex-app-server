@@ -322,6 +322,7 @@ export type CallbackAction =
       kind: "resume-thread";
       conversation: ConversationRef;
       threadId: string;
+      threadTitle?: string;
       workspaceDir: string;
       syncTopic?: boolean;
       requestedModel?: string;
