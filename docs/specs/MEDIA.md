@@ -14,9 +14,10 @@ This is a spec/notes document only. It does not imply that inbound media support
 
 - Codex app-server already supports multimodal turn input via `UserInput`.
 - The supported image-shaped input items are remote/data URL images and local filesystem images.
-- This plugin currently sends text-only turn input to Codex.
+- This plugin now supports mixed text + image turn input and forwards inbound image media into Codex when OpenClaw provides a staged media path or URL.
 - OpenClaw’s plugin SDK already supports outbound attachments from a plugin via `mediaUrl` and `mediaUrls`.
-- OpenClaw’s plugin SDK does not currently expose inbound attachments or image files to plugin commands or `inbound_claim` hooks.
+- OpenClaw’s plugin SDK still does not model inbound attachments as a first-class typed field on command or `inbound_claim` events.
+- In practice, current `inbound_claim` hook metadata already carries `mediaPath` / `mediaType`, which is enough for this plugin to forward a staged inbound image.
 - The cleanest future bridge is: OpenClaw stages inbound files locally, then this plugin maps image paths to Codex `localImage` items.
 
 ## Codex App-Server Input Model
@@ -157,22 +158,27 @@ Or, if only a URL/data URL is available:
 
 ## Current State In This Plugin
 
-Today this plugin builds text-only turn input:
+This plugin now builds multimodal turn input when image media is available:
 
 Source:
 - [`src/client.ts`](../../src/client.ts)
 
 ```ts
-function buildTurnInput(prompt: string): Array<Record<string, unknown>> {
+function buildTurnInput(prompt: string, input?: readonly CodexTurnInputItem[]) {
+  if (input?.length) {
+    return input.map((item) => ({ ...item }));
+  }
   return [{ type: "text", text: prompt }];
 }
 ```
 
 That means:
 
-- even though Codex app-server supports images
-- and even though OpenClaw can handle attachments elsewhere
-- this plugin currently does not forward inbound JPEG/PNG/etc. into Codex
+- text-only turns still work as before
+- mixed text + image turns can be forwarded into Codex
+- image-only inbound turns can be forwarded into Codex
+- staged text attachments such as `.txt`, `.md`, `.json`, `.yaml`, and `.yml` can be read and forwarded as additional `text` items
+- unsupported binary non-image inbound media is still ignored for now
 
 ## OpenClaw Plugin SDK: Outbound Media
 
@@ -277,8 +283,9 @@ export type PluginHookInboundClaimEvent = {
 So, from the plugin’s point of view today:
 
 - outbound attachments are supported
-- inbound attachments are not modeled as first-class plugin input
-- a command handler cannot currently receive a JPEG as a structured image input from OpenClaw
+- inbound attachments are still not modeled as first-class typed plugin input
+- `inbound_claim` metadata does already carry `mediaPath` / `mediaType`, so the plugin can use that best-effort bridge for inbound image forwarding
+- command handlers still cannot rely on a first-class structured image field from OpenClaw
 
 ## OpenClaw Gateway Already Has Attachment Logic
 
@@ -407,10 +414,12 @@ Within this repository, future media support would require at least:
   - local image path -> `localImage`
   - remote/data URL image -> `image`
   - mixed text + image turn input
-  - non-image attachments ignored or downgraded to text references
+  - text attachments read and forwarded as `text`
+  - unsupported binary attachments ignored or downgraded to text references
 
-Until then, the practical answer is:
+The remaining practical boundary is:
 
-- Codex app-server already supports images
+- Codex app-server already supports images plus ordinary text items
 - OpenClaw already supports outbound attachments from plugins
-- but this plugin cannot yet accept inbound JPEG/PNG/etc. from OpenClaw as Codex turn input because the current plugin boundary does not expose those attachments
+- this plugin can now turn staged inbound images into Codex image input and staged inbound text files into Codex text input
+- richer binary formats such as PDF, audio, and video still need preprocessing before they can be meaningfully sent to Codex

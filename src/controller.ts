@@ -9,6 +9,7 @@ import type {
   OpenClawPluginApi,
   OpenClawPluginService,
   PluginCommandContext,
+  PluginInboundMedia,
   PluginInteractiveButtons,
   PluginInteractiveDiscordHandlerContext,
   PluginInteractiveTelegramHandlerContext,
@@ -58,6 +59,7 @@ import { formatCommandUsage, renderCommandHelpText } from "./help.js";
 import type {
   AccountSummary,
   CollaborationMode,
+  CodexTurnInputItem,
   ConversationPreferences,
   InteractiveMessageRef,
   PermissionsMode,
@@ -109,6 +111,28 @@ type ActiveRunRecord = {
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
+const TEXT_ATTACHMENT_FILE_EXTENSIONS = new Set([
+  ".json",
+  ".log",
+  ".markdown",
+  ".md",
+  ".txt",
+  ".yaml",
+  ".yml",
+]);
+const TEXT_ATTACHMENT_MIME_TYPES = new Set([
+  "application/json",
+  "application/x-ndjson",
+  "application/x-yaml",
+  "application/yaml",
+  "text/json",
+  "text/markdown",
+  "text/plain",
+  "text/x-markdown",
+  "text/yaml",
+]);
+const MAX_TEXT_ATTACHMENT_BYTES = 64 * 1024;
+const MAX_TEXT_ATTACHMENT_CHARS = 16_000;
 const PLUGIN_VERSION = (() => {
   try {
     const packageJson = require("../package.json") as { version?: unknown };
@@ -231,6 +255,20 @@ function isTelegramChannel(channel: string): boolean {
 function isDiscordChannel(channel: string): boolean {
   return channel.trim().toLowerCase() === "discord";
 }
+
+const IMAGE_FILE_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".heic",
+  ".heif",
+  ".avif",
+]);
 
 function buildPlainReply(text: string): ReplyPayload {
   return { text };
@@ -401,6 +439,222 @@ function toConversationTargetFromInbound(event: {
             : undefined
           : undefined,
   };
+}
+
+function asStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  return [];
+}
+
+function normalizeInboundMediaPath(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.startsWith("file://")) {
+    try {
+      return fileURLToPath(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  return trimmed;
+}
+
+function isImageMimeType(value: string | undefined): boolean {
+  return Boolean(value?.trim().toLowerCase().startsWith("image/"));
+}
+
+function normalizeMimeType(value: string | undefined): string | undefined {
+  const trimmed = value?.trim().toLowerCase();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed.split(";", 1)[0]?.trim() || undefined;
+}
+
+function isImagePathLike(value: string | undefined): boolean {
+  const normalized = normalizeInboundMediaPath(value);
+  if (!normalized) {
+    return false;
+  }
+  return IMAGE_FILE_EXTENSIONS.has(path.extname(normalized).toLowerCase());
+}
+
+function isTextAttachmentMimeType(value: string | undefined): boolean {
+  const normalized = normalizeMimeType(value);
+  return Boolean(
+    normalized &&
+      (normalized.startsWith("text/") || TEXT_ATTACHMENT_MIME_TYPES.has(normalized)),
+  );
+}
+
+function isTextAttachmentPathLike(value: string | undefined): boolean {
+  const normalized = normalizeInboundMediaPath(value);
+  if (!normalized || isUrlLike(normalized)) {
+    return false;
+  }
+  return TEXT_ATTACHMENT_FILE_EXTENSIONS.has(path.extname(normalized).toLowerCase());
+}
+
+function isUrlLike(value: string | undefined): boolean {
+  const trimmed = value?.trim();
+  return Boolean(trimmed && /^(https?:|data:|file:)/i.test(trimmed));
+}
+
+function extractInboundMetadataMedia(metadata?: Record<string, unknown>): PluginInboundMedia[] {
+  if (!metadata) {
+    return [];
+  }
+  const mediaPaths = asStringArray(metadata.mediaPaths).concat(asStringArray(metadata.mediaPath));
+  const mediaTypes = asStringArray(metadata.mediaTypes).concat(asStringArray(metadata.mediaType));
+  const count = Math.max(mediaPaths.length, mediaTypes.length);
+  const results: PluginInboundMedia[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const mediaPath = mediaPaths[index];
+    const mimeType = mediaTypes[index] ?? mediaTypes[0];
+    if (!mediaPath && !mimeType) {
+      continue;
+    }
+    const normalizedPath = normalizeInboundMediaPath(mediaPath);
+    results.push({
+      kind:
+        isImageMimeType(mimeType) || isImagePathLike(normalizedPath)
+          ? "image"
+          : "document",
+      ...(isUrlLike(normalizedPath)
+        ? { url: normalizedPath }
+        : normalizedPath
+          ? { path: normalizedPath }
+          : {}),
+      ...(mimeType ? { mimeType } : {}),
+      source: "metadata",
+    });
+  }
+  return results;
+}
+
+function toCodexImageInputItem(media: PluginInboundMedia): CodexTurnInputItem | null {
+  if (
+    media.kind !== "image" &&
+    !isImageMimeType(media.mimeType) &&
+    !isImagePathLike(media.path) &&
+    !isImagePathLike(media.url)
+  ) {
+    return null;
+  }
+  const normalizedPath = normalizeInboundMediaPath(media.path ?? media.url);
+  if (normalizedPath && path.isAbsolute(normalizedPath)) {
+    return { type: "localImage", path: normalizedPath };
+  }
+  const urlCandidate = media.url?.trim() || normalizedPath;
+  if (urlCandidate && isUrlLike(urlCandidate)) {
+    return { type: "image", url: urlCandidate };
+  }
+  return null;
+}
+
+async function toCodexTextAttachmentInputItem(
+  media: PluginInboundMedia,
+): Promise<CodexTurnInputItem | null> {
+  if (
+    media.kind === "image" ||
+    !(
+      isTextAttachmentMimeType(media.mimeType) ||
+      isTextAttachmentPathLike(media.path) ||
+      isTextAttachmentPathLike(media.url)
+    )
+  ) {
+    return null;
+  }
+  const normalizedPath = normalizeInboundMediaPath(media.path ?? media.url);
+  if (!normalizedPath || !path.isAbsolute(normalizedPath)) {
+    return null;
+  }
+  const stats = await fs.stat(normalizedPath).catch(() => undefined);
+  if (!stats?.isFile()) {
+    return null;
+  }
+  const bytesToRead = Math.min(stats.size, MAX_TEXT_ATTACHMENT_BYTES);
+  const handle = await fs.open(normalizedPath, "r").catch(() => undefined);
+  if (!handle) {
+    return null;
+  }
+  let rawContent = "";
+  try {
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+    rawContent = buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+  const normalizedContent = rawContent.replace(/\r\n/g, "\n");
+  const truncatedByBytes = stats.size > MAX_TEXT_ATTACHMENT_BYTES;
+  const truncatedByChars = normalizedContent.length > MAX_TEXT_ATTACHMENT_CHARS;
+  const content =
+    truncatedByChars
+      ? normalizedContent.slice(0, MAX_TEXT_ATTACHMENT_CHARS)
+      : normalizedContent;
+  const displayName =
+    media.fileName?.trim() || path.basename(normalizedPath) || "attached-file.txt";
+  const mimeType = normalizeMimeType(media.mimeType);
+  const lines = [`Attached file: ${displayName}`];
+  if (mimeType) {
+    lines.push(`Content-Type: ${mimeType}`);
+  }
+  lines.push("", content.trim().length > 0 ? content : "[File is empty]");
+  if (truncatedByBytes || truncatedByChars) {
+    lines.push("", "[Truncated]");
+  }
+  return { type: "text", text: lines.join("\n") };
+}
+
+async function buildInboundTurnInput(event: {
+  content: string;
+  media?: PluginInboundMedia[];
+  metadata?: Record<string, unknown>;
+}): Promise<CodexTurnInputItem[]> {
+  const items: CodexTurnInputItem[] = [];
+  if (event.content.trim()) {
+    items.push({ type: "text", text: event.content });
+  }
+  const seen = new Set<string>();
+  for (const media of [...(event.media ?? []), ...extractInboundMetadataMedia(event.metadata)]) {
+    const item = toCodexImageInputItem(media) ?? (await toCodexTextAttachmentInputItem(media));
+    if (!item) {
+      continue;
+    }
+    const key =
+      item.type === "localImage"
+        ? `${item.type}:${item.path}`
+        : item.type === "image"
+          ? `${item.type}:${item.url}`
+          : `${item.type}:${item.text}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    items.push(item);
+  }
+  return items;
+}
+
+function isQueueCompatibleTurnInput(
+  prompt: string,
+  input: readonly CodexTurnInputItem[] | undefined,
+): boolean {
+  if (!input?.length) {
+    return true;
+  }
+  return input.length === 1 && input[0]?.type === "text" && input[0].text === prompt;
 }
 
 function buildReplyWithButtons(text: string, buttons?: PluginInteractiveButtons): ReplyPayload {
@@ -1053,6 +1307,7 @@ export class CodexPluginController {
     parentConversationId?: string;
     threadId?: string | number;
     isGroup?: boolean;
+    media?: PluginInboundMedia[];
     metadata?: Record<string, unknown>;
   }): Promise<{ handled: boolean }> {
     try {
@@ -1064,6 +1319,8 @@ export class CodexPluginController {
       if (!conversation) {
         return { handled: false };
       }
+      const input = await buildInboundTurnInput(event);
+      const requiresStructuredInput = !isQueueCompatibleTurnInput(event.content, input);
       const activeKey = buildConversationKey(conversation);
       const active = this.activeRuns.get(activeKey);
       if (active) {
@@ -1074,33 +1331,39 @@ export class CodexPluginController {
           this.activeRuns.delete(activeKey);
           await active.handle.interrupt().catch(() => undefined);
         } else {
-        const pending = this.store.getPendingRequestByConversation(conversation);
-        if (pending?.state.questionnaire && !event.content.trim().startsWith("/")) {
-          const handled = await this.handlePendingQuestionnaireFreeformAnswer(
-            conversation,
-            pending,
-            active.handle,
-            event.content,
-          );
-          if (handled) {
-            return { handled: true };
+          const pending = this.store.getPendingRequestByConversation(conversation);
+          if (pending?.state.questionnaire && !event.content.trim().startsWith("/")) {
+            const handled = await this.handlePendingQuestionnaireFreeformAnswer(
+              conversation,
+              pending,
+              active.handle,
+              event.content,
+            );
+            if (handled) {
+              return { handled: true };
+            }
           }
-        }
-        try {
-          const handled = await active.handle.queueMessage(event.content);
-          if (handled) {
-            return { handled: true };
+          if (requiresStructuredInput) {
+            this.api.logger.debug?.(
+              `codex inbound claim restarting active run for structured input conversation=${conversation.conversationId}`,
+            );
+          } else {
+            try {
+              const handled = await active.handle.queueMessage(event.content);
+              if (handled) {
+                return { handled: true };
+              }
+              this.api.logger.warn(
+                `codex inbound claim could not enqueue message for active run; restarting thread conversation=${conversation.conversationId}`,
+              );
+            } catch (error) {
+              this.api.logger.warn(
+                `codex inbound claim active run enqueue failed; restarting thread conversation=${conversation.conversationId}: ${String(error)}`,
+              );
+            }
           }
-          this.api.logger.warn(
-            `codex inbound claim could not enqueue message for active run; restarting thread conversation=${conversation.conversationId}`,
-          );
-        } catch (error) {
-          this.api.logger.warn(
-            `codex inbound claim active run enqueue failed; restarting thread conversation=${conversation.conversationId}: ${String(error)}`,
-          );
-        }
-        this.activeRuns.delete(activeKey);
-        await active.handle.interrupt().catch(() => undefined);
+          this.activeRuns.delete(activeKey);
+          await active.handle.interrupt().catch(() => undefined);
         }
       }
       const existingBinding = this.store.getBinding(conversation);
@@ -1130,6 +1393,7 @@ export class CodexPluginController {
         binding: resolvedBinding,
         workspaceDir: resolvedBinding.workspaceDir,
         prompt: event.content,
+        input,
         reason: "inbound",
       });
       this.api.logger.debug?.(
@@ -3015,6 +3279,7 @@ export class CodexPluginController {
     binding: StoredBinding | null;
     workspaceDir: string;
     prompt: string;
+    input?: readonly CodexTurnInputItem[];
     reason: "command" | "inbound" | "plan";
     collaborationMode?: CollaborationMode;
   }): Promise<void> {
@@ -3028,6 +3293,12 @@ export class CodexPluginController {
       if (existing.mode === "plan" && (params.collaborationMode?.mode ?? "default") !== "plan") {
         this.api.logger.debug?.(
           `codex turn request replacing active plan run ${this.formatConversationForLog(params.conversation)}`,
+        );
+        this.activeRuns.delete(key);
+        await existing.handle.interrupt().catch(() => undefined);
+      } else if (!isQueueCompatibleTurnInput(params.prompt, params.input)) {
+        this.api.logger.debug?.(
+          `codex turn request restarting active run for structured input ${this.formatConversationForLog(params.conversation)} mode=${existing.mode}`,
         );
         this.activeRuns.delete(key);
         await existing.handle.interrupt().catch(() => undefined);
@@ -3066,6 +3337,7 @@ export class CodexPluginController {
       sessionKey: params.binding?.sessionKey,
       workspaceDir: params.workspaceDir,
       prompt: params.prompt,
+      input: params.input,
       runId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       existingThreadId: params.binding?.threadId,
       model: desired.model,
