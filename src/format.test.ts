@@ -82,6 +82,21 @@ describe("formatThreadButtonLabel", () => {
       }),
     ).toBe("What is wrong with this layout?");
   });
+
+  it("truncates long summary fallbacks before rendering", () => {
+    const label = formatThreadButtonLabel({
+      thread: {
+        threadId: "thread-long",
+        summary:
+          "This is a very long first user prompt that should not become an enormous unnamed thread label in the resume picker UI",
+      },
+      includeProjectSuffix: false,
+    });
+
+    expect(label).toContain("This is a very long first user");
+    expect(label.length).toBeLessThanOrEqual(72);
+    expect(label).toContain("...");
+  });
 });
 
 describe("formatThreadPicker", () => {
