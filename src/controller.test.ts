@@ -273,6 +273,27 @@ function buildTelegramCommandContext(
   } as unknown as PluginCommandContext;
 }
 
+function buildFeishuCommandContext(
+  overrides: Partial<PluginCommandContext> & Record<string, unknown> = {},
+): PluginCommandContext {
+  return {
+    senderId: "user-1",
+    channel: "feishu",
+    channelId: "feishu",
+    isAuthorizedSender: true,
+    args: "",
+    commandBody: "/cas_cb",
+    config: {},
+    from: "feishu:oc_test",
+    to: "feishu:oc_test",
+    accountId: "default",
+    requestConversationBinding: vi.fn(async () => ({ status: "bound" as const })),
+    detachConversationBinding: vi.fn(async () => ({ removed: true })),
+    getCurrentConversationBinding: vi.fn(async () => null),
+    ...overrides,
+  } as unknown as PluginCommandContext;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -434,6 +455,28 @@ describe("Discord controller flows", () => {
     expect(resumeHelp.text).toContain("Usage:");
     expect(statusHelp.text).toContain("/cas_status");
     expect(statusHelp.text).toContain("--yolo, --no-yolo");
+  });
+
+  it("executes run-command callbacks for /cas_cb instead of returning generic completion text", async () => {
+    const { controller } = await createControllerHarness();
+    const callback = await (controller as any).store.putCallback({
+      kind: "run-command",
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "oc_test",
+      },
+      commandName: "cas_model",
+      args: "",
+    });
+
+    const reply = await controller.handleCommand("cas_cb", buildFeishuCommandContext({
+      args: callback.token,
+      commandBody: `/cas_cb ${callback.token}`,
+    }));
+
+    expect(reply.text).not.toBe("Action completed.");
+    expect(reply.text).toContain("openai/gpt-5.4");
   });
 
   it("keeps usage error paths for cas_fast, cas_steer, and cas_plan", async () => {

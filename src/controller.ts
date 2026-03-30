@@ -5642,7 +5642,20 @@ export class CodexPluginController {
           callback.args ?? "",
         ),
       );
-      await this.sendReplyPayloadToConversation(conversation, payload);
+      const buttons = extractReplyButtons(payload);
+      const text = payload.text?.trim() ?? "";
+      if (buttons) {
+        await responders.editPicker({
+          text: text || "Choose an action:",
+          buttons,
+        });
+        return;
+      }
+      if (text) {
+        await responders.reply(text);
+        return;
+      }
+      await responders.reply("Action completed.");
       return;
     }
     if (callback.kind === "toggle-fast") {
