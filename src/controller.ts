@@ -58,7 +58,7 @@ import {
   normalizeReasoningEffort,
   REASONING_EFFORT_OPTIONS,
 } from "./model-capabilities.js";
-import { COMMANDS } from "./commands.js";
+import { COMMANDS, type CommandName } from "./commands.js";
 import { formatCommandUsage, renderCommandHelpText } from "./help.js";
 import type {
   AccountSummary,
@@ -2136,33 +2136,72 @@ export class CodexPluginController {
         ].join("\n"),
       };
     }
-    const callbacks = await Promise.all(
-      COMMANDS.map(async ([commandName]) => ({
-        commandName,
+    const callbacks = [];
+    callbacks.push({
+      label: "Help",
+      token: (
+        await this.store.putCallback({
+          kind: "reply-text",
+          conversation,
+          text: renderCommandHelpText("cas"),
+        })
+      ).token,
+    });
+    for (const [commandName] of COMMANDS) {
+      if (commandName === "cas") {
+        continue;
+      }
+      callbacks.push({
+        label: `/${commandName}`,
         token: (
           await this.store.putCallback({
-            kind: "reply-text",
+            kind: "run-command",
             conversation,
-            text: renderCommandHelpText(commandName),
+            commandName,
+            args: "",
           })
         ).token,
-      })),
-    );
+      });
+    }
     const buttons: PluginInteractiveButtons = [];
     for (let index = 0; index < callbacks.length; index += 2) {
       const row = callbacks
         .slice(index, index + 2)
         .map((entry) => ({
-          text: `/${entry.commandName}`,
+          text: entry.label,
           callback_data: `${INTERACTIVE_NAMESPACE}:${entry.token}`,
         }));
       buttons.push(row);
     }
     const reply = buildReplyWithButtons(
-      "Supported Codex commands. Tap a button to view detailed help.",
+      "Codex command menu. Tap a button to run it directly. Use Help for command details.",
       buttons,
     );
     return isFeishuChannel(conversation.channel) ? stripTopLevelText(reply) : reply;
+  }
+
+  private buildCallbackCommandContext(
+    conversation: ConversationTarget,
+    responders: PickerResponders,
+    binding: StoredBinding | null,
+    commandName: string,
+    args: string,
+  ): PluginCommandContext {
+    return {
+      senderId: conversation.conversationId,
+      channel: conversation.channel,
+      channelId: conversation.channel,
+      isAuthorizedSender: true,
+      args,
+      commandBody: `/${commandName}${args.trim() ? ` ${args.trim()}` : ""}`,
+      config: this.lastRuntimeConfig ?? {},
+      from: conversation.conversationId,
+      to: conversation.conversationId,
+      accountId: conversation.accountId,
+      requestConversationBinding: responders.requestConversationBinding,
+      detachConversationBinding: responders.detachConversationBinding,
+      getCurrentConversationBinding: async () => (binding ? { bound: true } : null),
+    } as PluginCommandContext;
   }
 
   private async handleStartNewThreadSelection(
@@ -5578,6 +5617,32 @@ export class CodexPluginController {
         collaborationMode: callback.collaborationMode,
       });
       await responders.reply(ackText);
+      return;
+    }
+    if (callback.kind === "run-command") {
+      await responders.clear().catch(() => undefined);
+      await this.store.removeCallback(callback.token);
+      const conversation = {
+        ...callback.conversation,
+        threadId: responders.conversation.threadId,
+      };
+      const binding = this.store.getBinding(callback.conversation);
+      const commandName = callback.commandName as CommandName;
+      if (commandName === "cas" || !COMMANDS.some(([name]) => name === commandName)) {
+        await responders.reply("Unknown Codex command.");
+        return;
+      }
+      const payload = await this.handleCommand(
+        commandName,
+        this.buildCallbackCommandContext(
+          conversation,
+          responders,
+          binding,
+          commandName,
+          callback.args ?? "",
+        ),
+      );
+      await this.sendReplyPayloadToConversation(conversation, payload);
       return;
     }
     if (callback.kind === "toggle-fast") {

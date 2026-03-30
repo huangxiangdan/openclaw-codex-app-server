@@ -74,6 +74,14 @@ type PutCallbackInput =
       ttlMs?: number;
     }
   | {
+      kind: "run-command";
+      conversation: ConversationTarget;
+      commandName: string;
+      args?: string;
+      token?: string;
+      ttlMs?: number;
+    }
+  | {
       kind: "rename-thread";
       conversation: ConversationTarget;
       style: "thread-project" | "thread";
@@ -526,6 +534,16 @@ export class PluginStateStore {
                   createdAt: now,
                   expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
                 }
+              : callback.kind === "run-command"
+                ? {
+                    kind: "run-command",
+                    conversation: callback.conversation,
+                    commandName: callback.commandName,
+                    args: callback.args,
+                    token: callback.token ?? this.createCallbackToken(),
+                    createdAt: now,
+                    expiresAt: now + (callback.ttlMs ?? CALLBACK_TTL_MS),
+                  }
               : callback.kind === "rename-thread"
                 ? {
                     kind: "rename-thread",

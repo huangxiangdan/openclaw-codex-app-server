@@ -433,6 +433,15 @@ export type CallbackAction =
     }
   | {
       token: string;
+      kind: "run-command";
+      conversation: ConversationRef;
+      commandName: string;
+      args?: string;
+      createdAt: number;
+      expiresAt: number;
+    }
+  | {
+      token: string;
       kind: "toggle-fast";
       conversation: ConversationRef;
       createdAt: number;

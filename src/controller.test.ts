@@ -382,17 +382,30 @@ describe("Discord controller flows", () => {
     expect(renameHelp.text).toContain("Usage:");
   });
 
-  it("renders a /cas command menu with callback buttons for command help", async () => {
+  it("renders a /cas command menu with a Help button and runnable command callbacks", async () => {
     const { controller } = await createControllerHarness();
 
     const reply = await controller.handleCommand("cas", buildTelegramCommandContext({
       commandBody: "/cas",
     }));
 
-    expect(reply.text).toContain("Supported Codex commands");
+    expect(reply.text).toContain("Codex command menu");
     const buttons = (reply.channelData as any)?.telegram?.buttons;
     expect(Array.isArray(buttons)).toBe(true);
     const flatButtons = buttons.flat();
+    expect(flatButtons.some((button: { text: string }) => button.text === "/cas")).toBe(false);
+    const helpButton = flatButtons.find(
+      (button: { text: string; callback_data: string }) => button.text === "Help",
+    );
+    expect(helpButton).toBeDefined();
+    const helpToken = (helpButton.callback_data as string).split(":").pop() ?? "";
+    const helpCallback = (controller as any).store.getCallback(helpToken);
+    expect(helpCallback).toEqual(expect.objectContaining({
+      kind: "reply-text",
+    }));
+    expect(helpCallback?.text).toContain("/cas");
+    expect(helpCallback?.text).toContain("Usage:");
+
     const resumeButton = flatButtons.find(
       (button: { text: string; callback_data: string }) => button.text === "/cas_resume",
     );
@@ -400,10 +413,9 @@ describe("Discord controller flows", () => {
     const token = (resumeButton.callback_data as string).split(":").pop() ?? "";
     const callback = (controller as any).store.getCallback(token);
     expect(callback).toEqual(expect.objectContaining({
-      kind: "reply-text",
+      kind: "run-command",
     }));
-    expect(callback?.text).toContain("/cas_resume");
-    expect(callback?.text).toContain("Usage:");
+    expect(callback?.commandName).toBe("cas_resume");
   });
 
   it("renders help when Telegram-style em dash is used for --help", async () => {
