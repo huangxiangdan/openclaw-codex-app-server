@@ -244,6 +244,52 @@ describe("state store", () => {
     ).toBeNull();
   });
 
+  it("distinguishes feishu threads in the same conversation", async () => {
+    const store = await makeStore();
+    await store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "chat-1",
+        threadId: "topic-a",
+      },
+      sessionKey: buildPluginSessionKey("thread-a"),
+      threadId: "thread-a",
+      workspaceDir: "/tmp/work-a",
+      updatedAt: Date.now(),
+    });
+    await store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "chat-1",
+        threadId: "topic-b",
+      },
+      sessionKey: buildPluginSessionKey("thread-b"),
+      threadId: "thread-b",
+      workspaceDir: "/tmp/work-b",
+      updatedAt: Date.now(),
+    });
+
+    expect(
+      store.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "chat-1",
+        threadId: "topic-a",
+      })?.threadId,
+    ).toBe("thread-a");
+    expect(
+      store.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "chat-1",
+        threadId: "topic-b",
+      })?.threadId,
+    ).toBe("thread-b");
+    expect(store.listBindings()).toHaveLength(2);
+  });
+
   it("persists conversation preferences in bindings across reload", async () => {
     const dir = await makeStoreDir();
     const store = await makeStore(dir);

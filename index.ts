@@ -44,6 +44,24 @@ const plugin = {
       },
     });
 
+    api.registerInteractiveHandler({
+      channel: "feishu",
+      namespace: INTERACTIVE_NAMESPACE,
+      handler: async (ctx) => {
+        await controller.handleFeishuInteractive(ctx);
+        return { handled: true };
+      },
+    });
+
+    api.registerCommand({
+      name: "cas_cb",
+      description: "Internal Codex callback bridge for Feishu card actions.",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        return await controller.handleCommand("cas_cb", ctx);
+      },
+    });
+
     for (const [name, description] of COMMANDS) {
       api.registerCommand({
         name,

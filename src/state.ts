@@ -192,11 +192,19 @@ type PutCallbackInput =
 
 function toConversationKey(target: ConversationTarget): string {
   const channel = target.channel.trim().toLowerCase();
+  const threadScope =
+    channel === "telegram"
+      ? target.parentConversationId?.trim() ?? ""
+      : channel === "feishu"
+        ? target.threadId != null
+          ? String(target.threadId).trim()
+          : ""
+        : "";
   return [
     channel,
     target.accountId.trim(),
     target.conversationId.trim(),
-    channel === "telegram" ? (target.parentConversationId?.trim() ?? "") : "",
+    threadScope,
   ].join("::");
 }
 

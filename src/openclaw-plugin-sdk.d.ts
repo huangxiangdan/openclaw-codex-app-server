@@ -10,6 +10,7 @@ declare module "openclaw/plugin-sdk" {
     isError?: boolean;
     isReasoning?: boolean;
     channelData?: Record<string, unknown>;
+    interactive?: unknown;
   };
 
   export type ConversationRef = {
@@ -17,6 +18,7 @@ declare module "openclaw/plugin-sdk" {
     accountId: string;
     conversationId: string;
     parentConversationId?: string;
+    threadId?: string | number;
   };
 
   export type PluginLogger = {
@@ -146,6 +148,52 @@ declare module "openclaw/plugin-sdk" {
     };
   };
 
+  export type PluginInteractiveLarkHandlerContext = {
+    channel: "lark";
+    accountId: string;
+    callbackId?: string;
+    conversationId: string;
+    parentConversationId?: string;
+    senderId?: string;
+    senderUsername?: string;
+    threadId?: string | number;
+    auth: { isAuthorizedSender: boolean };
+    callback?: {
+      data?: string;
+      namespace?: string;
+      payload: string;
+      messageId?: string;
+      chatId?: string;
+      messageText?: string;
+    };
+    interaction?: {
+      kind?: "button" | "select" | "modal";
+      data?: string;
+      namespace?: string;
+      payload?: string;
+      messageId?: string;
+      values?: string[];
+      fields?: Array<{ id: string; name: string; values: string[] }>;
+    };
+    respond: {
+      acknowledge?: () => Promise<void>;
+      reply: (params: {
+        text: string;
+        buttons?: PluginInteractiveButtons;
+        ephemeral?: boolean;
+      }) => Promise<void>;
+      followUp?: (params: {
+        text: string;
+        buttons?: PluginInteractiveButtons;
+        ephemeral?: boolean;
+      }) => Promise<void>;
+      editMessage?: (params: { text?: string; buttons?: PluginInteractiveButtons }) => Promise<void>;
+      clearButtons?: () => Promise<void>;
+      clearComponents?: (params?: { text?: string }) => Promise<void>;
+      deleteMessage?: () => Promise<void>;
+    };
+  };
+
   export type OpenClawPluginService = {
     id: string;
     start: (ctx: { workspaceDir?: string }) => void | Promise<void>;
@@ -256,11 +304,38 @@ declare module "openclaw/plugin-sdk" {
             ) => Promise<unknown>;
           };
         };
+        lark: {
+          sendMessageLark: (
+            to: string,
+            text: string,
+            opts?: {
+              accountId?: string;
+              threadId?: string | number;
+              mediaUrl?: string;
+              mediaLocalRoots?: readonly string[];
+              buttons?: PluginInteractiveButtons;
+            },
+          ) => Promise<{ messageId: string; chatId?: string; conversationId?: string }>;
+          typing?: {
+            start: (params: {
+              to: string;
+              accountId?: string;
+              threadId?: string | number;
+            }) => Promise<{ refresh: () => Promise<void>; stop: () => void }>;
+          };
+          conversationActions?: {
+            renameConversation?: (
+              conversationId: string,
+              params: { name?: string },
+              opts?: { accountId?: string },
+            ) => Promise<unknown>;
+          };
+        };
       };
     };
     registerService: (service: OpenClawPluginService) => void;
     registerInteractiveHandler: (registration: {
-      channel: "telegram" | "discord";
+      channel: "telegram" | "discord" | "lark" | "feishu";
       namespace: string;
       handler: (ctx: any) => Promise<{ handled?: boolean } | void> | { handled?: boolean } | void;
     }) => void;

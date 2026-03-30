@@ -12,6 +12,7 @@ import type {
   PluginInboundMedia,
   PluginInteractiveButtons,
   PluginInteractiveDiscordHandlerContext,
+  PluginInteractiveLarkHandlerContext as PluginInteractiveFeishuHandlerContext,
   PluginInteractiveTelegramHandlerContext,
   ReplyPayload,
   ConversationRef,
@@ -45,6 +46,7 @@ import {
   formatProjectPickerIntro,
   formatReviewCompletion,
   formatSkills,
+  formatThreadPicker,
   formatThreadButtonLabel,
   formatThreadPickerIntro,
   formatTurnCompletion,
@@ -257,6 +259,56 @@ function isDiscordChannel(channel: string): boolean {
   return channel.trim().toLowerCase() === "discord";
 }
 
+function isFeishuChannel(channel: string): boolean {
+  return channel.trim().toLowerCase() === "feishu";
+}
+
+function normalizeChannelName(channel: string): string {
+  if (isTelegramChannel(channel)) {
+    return "telegram";
+  }
+  if (isDiscordChannel(channel)) {
+    return "discord";
+  }
+  if (isFeishuChannel(channel)) {
+    return "feishu";
+  }
+  return channel.trim().toLowerCase();
+}
+
+function shouldSendPickerOutOfBand(channel: string): boolean {
+  return isDiscordChannel(channel);
+}
+
+function shouldSendOutOfBandAck(channel: string): boolean {
+  return isDiscordChannel(channel);
+}
+
+function formatChannelDisplayName(channel: string): string {
+  if (isTelegramChannel(channel)) {
+    return "Telegram";
+  }
+  if (isDiscordChannel(channel)) {
+    return "Discord";
+  }
+  if (isFeishuChannel(channel)) {
+    return "Feishu";
+  }
+  return channel.trim() || "chat";
+}
+
+function extractInteractiveToken(callbackData: string): string | null {
+  const raw = callbackData.trim();
+  if (!raw) {
+    return null;
+  }
+  if (raw.startsWith(`${INTERACTIVE_NAMESPACE}:`)) {
+    const token = raw.slice(INTERACTIVE_NAMESPACE.length + 1).trim();
+    return token || null;
+  }
+  return raw;
+}
+
 const IMAGE_FILE_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -341,6 +393,20 @@ function denormalizeDiscordConversationId(raw: string | undefined): string | und
   return trimmed;
 }
 
+function normalizeFeishuConversationId(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.startsWith("feishu:")) {
+    return trimmed.slice("feishu:".length);
+  }
+  return trimmed;
+}
+
 function normalizeDiscordInteractiveConversationId(params: {
   conversationId?: string;
   guildId?: string;
@@ -386,6 +452,20 @@ function toConversationTargetFromCommand(ctx: PluginCommandContext): Conversatio
       conversationId,
     };
   }
+  if (isFeishuChannel(ctx.channel)) {
+    const sourceId = ctx.to ?? ctx.from ?? ctx.senderId;
+    const conversationId = normalizeFeishuConversationId(sourceId);
+    if (!conversationId) {
+      return null;
+    }
+    return {
+      channel: "feishu",
+      accountId: ctx.accountId ?? "default",
+      conversationId,
+      threadId:
+        typeof ctx.messageThreadId === "number" ? ctx.messageThreadId : undefined,
+    };
+  }
   return null;
 }
 
@@ -402,9 +482,10 @@ function toConversationTargetFromInbound(event: {
     return null;
   }
   const channel = event.channel.trim().toLowerCase();
+  const normalizedChannel = normalizeChannelName(channel);
   const conversationIdRaw = event.conversationId?.trim();
   const conversationId =
-    channel === "discord"
+    normalizedChannel === "discord"
       ? (() => {
           const normalized = normalizeDiscordConversationId(conversationIdRaw);
           if (!normalized) {
@@ -418,27 +499,33 @@ function toConversationTargetFromInbound(event: {
           const isChannel = Boolean(event.parentConversationId?.trim() || event.isGroup || guildId);
           return `${isChannel ? "channel" : "user"}:${normalized}`;
         })()
-      : event.conversationId;
+      : normalizedChannel === "feishu"
+        ? normalizeFeishuConversationId(conversationIdRaw)
+        : event.conversationId;
   const parentConversationId =
-    channel === "discord"
+    normalizedChannel === "discord"
       ? normalizeDiscordConversationId(event.parentConversationId)
+      : normalizedChannel === "feishu"
+        ? normalizeFeishuConversationId(event.parentConversationId)
       : event.parentConversationId;
   if (!conversationId) {
     return null;
   }
   return {
-    channel,
+    channel: normalizedChannel,
     accountId: event.accountId,
     conversationId,
     parentConversationId,
     threadId:
-      typeof event.threadId === "number"
-        ? event.threadId
-        : typeof event.threadId === "string"
-          ? Number.isFinite(Number(event.threadId))
-            ? Number(event.threadId)
+      normalizedChannel === "telegram"
+        ? typeof event.threadId === "number"
+          ? event.threadId
+          : typeof event.threadId === "string"
+            ? Number.isFinite(Number(event.threadId))
+              ? Number(event.threadId)
+              : undefined
             : undefined
-          : undefined,
+        : event.threadId,
   };
 }
 
@@ -659,6 +746,54 @@ function isQueueCompatibleTurnInput(
 }
 
 function buildReplyWithButtons(text: string, buttons?: PluginInteractiveButtons): ReplyPayload {
+  const feishuCard = buttons
+    ? {
+        config: {
+          wide_screen_mode: true,
+        },
+        elements: [
+          {
+            tag: "markdown",
+            content: text,
+          },
+          ...buttons
+            .map((row) => {
+              const actions = row
+                .map((button) => {
+                  const token = extractInteractiveToken(button.callback_data);
+                  if (!token) {
+                    return null;
+                  }
+                  return {
+                    tag: "button",
+                    text: {
+                      tag: "plain_text",
+                      content: button.text,
+                    },
+                    type:
+                      button.style === "danger"
+                        ? "danger"
+                        : button.style === "success"
+                          ? "primary"
+                          : "default",
+                    value: {
+                      command: `/cas_cb ${token}`,
+                    },
+                  };
+                })
+                .filter((item): item is NonNullable<typeof item> => Boolean(item));
+              if (actions.length === 0) {
+                return null;
+              }
+              return {
+                tag: "action",
+                actions,
+              };
+            })
+            .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+        ],
+      }
+    : undefined;
   return buttons
     ? {
         text,
@@ -666,9 +801,30 @@ function buildReplyWithButtons(text: string, buttons?: PluginInteractiveButtons)
           telegram: {
             buttons,
           },
+          feishu: feishuCard
+            ? {
+                card: feishuCard,
+              }
+            : undefined,
+        },
+        interactive: {
+          blocks: buttons.map((row) => ({
+            type: "buttons",
+            buttons: row.map((button) => ({
+              label: button.text,
+              value: button.callback_data,
+              style: button.style ?? "primary",
+            })),
+          })),
         },
       }
     : { text };
+}
+
+function stripTopLevelText(reply: ReplyPayload): ReplyPayload {
+  const replyWithoutText = { ...reply };
+  delete replyWithoutText.text;
+  return replyWithoutText;
 }
 
 function extractReplyButtons(reply: ReplyPayload): PluginInteractiveButtons | undefined {
@@ -1241,19 +1397,27 @@ export class CodexPluginController {
   ): Promise<void> {
     await this.start();
     const conversation: ConversationTarget = {
-      channel: event.request.conversation.channel,
+      channel: normalizeChannelName(event.request.conversation.channel),
       accountId: event.request.conversation.accountId,
       conversationId: event.request.conversation.conversationId,
       parentConversationId: event.request.conversation.parentConversationId,
       threadId: (() => {
+        if (isTelegramChannel(event.request.conversation.channel)) {
+          if (typeof event.request.conversation.threadId === "number") {
+            return event.request.conversation.threadId;
+          }
+          if (typeof event.request.conversation.threadId !== "string") {
+            return undefined;
+          }
+          const normalized = Number(event.request.conversation.threadId.trim());
+          return Number.isFinite(normalized) ? normalized : undefined;
+        }
         if (typeof event.request.conversation.threadId === "number") {
           return event.request.conversation.threadId;
         }
-        if (typeof event.request.conversation.threadId !== "string") {
-          return undefined;
-        }
-        const normalized = Number(event.request.conversation.threadId.trim());
-        return Number.isFinite(normalized) ? normalized : undefined;
+        return typeof event.request.conversation.threadId === "string"
+          ? event.request.conversation.threadId.trim() || undefined
+          : undefined;
       })(),
     };
     const pending = this.store.getPendingBind(conversation);
@@ -1664,6 +1828,197 @@ export class CodexPluginController {
     }
   }
 
+  async handleFeishuInteractive(ctx: PluginInteractiveFeishuHandlerContext): Promise<void> {
+    await this.start();
+    const bindingApi = asScopedBindingApi(ctx);
+    const token = ctx.callback?.payload?.trim() || ctx.interaction?.payload?.trim() || "";
+    const callback = token ? this.store.getCallback(token) : null;
+    if (!callback) {
+      await ctx.respond.reply({
+        text: "That Codex action expired. Please retry the command.",
+        ephemeral: true,
+      });
+      return;
+    }
+    const conversation: ConversationTarget = {
+      channel: "feishu",
+      accountId: callback.conversation.accountId ?? ctx.accountId ?? "default",
+      conversationId:
+        normalizeFeishuConversationId(callback.conversation.conversationId) ??
+        normalizeFeishuConversationId(ctx.conversationId) ??
+        callback.conversation.conversationId,
+      parentConversationId:
+        normalizeFeishuConversationId(callback.conversation.parentConversationId) ??
+        normalizeFeishuConversationId(ctx.parentConversationId),
+      threadId: ctx.threadId,
+    };
+    const sourceMessageId = ctx.callback?.messageId?.trim() || ctx.interaction?.messageId?.trim();
+    await this.dispatchCallbackAction(callback, {
+      conversation,
+      sourceMessage: sourceMessageId
+        ? {
+            provider: "feishu",
+            messageId: sourceMessageId,
+            conversationId: conversation.conversationId,
+          }
+        : undefined,
+      acknowledge: async () => {
+        await ctx.respond.acknowledge?.().catch(() => undefined);
+      },
+      clear: async () => {
+        await ctx.respond.clearButtons?.().catch(() => undefined);
+        await ctx.respond.clearComponents?.().catch(() => undefined);
+      },
+      reply: async (text) => {
+        if (ctx.respond.followUp) {
+          await ctx.respond.followUp({ text, ephemeral: true });
+          return;
+        }
+        await ctx.respond.reply({ text, ephemeral: true });
+      },
+      editPicker: async (picker) => {
+        if (ctx.respond.editMessage) {
+          await ctx.respond.editMessage({
+            text: picker.text,
+            buttons: picker.buttons,
+          });
+          return;
+        }
+        await ctx.respond.reply({
+          text: picker.text,
+          buttons: picker.buttons,
+        });
+      },
+      requestConversationBinding: async (params) => {
+        const requestConversationBinding = bindingApi.requestConversationBinding;
+        if (!requestConversationBinding) {
+          return { status: "error", message: "Conversation binding is unavailable." } as const;
+        }
+        const result = await requestConversationBinding(params);
+        if (result.status === "pending") {
+          const buttons = extractReplyButtons(result.reply);
+          await ctx.respond.reply({
+            text: result.reply.text ?? "Bind approval requested.",
+            buttons,
+          });
+          return { status: "pending", reply: result.reply } as const;
+        }
+        return result;
+      },
+      detachConversationBinding: bindingApi.detachConversationBinding,
+    });
+  }
+
+  private async handleFeishuCardCallbackCommand(
+    conversation: ConversationTarget | null,
+    bindingApi: ScopedBindingApi,
+    args: string,
+  ): Promise<ReplyPayload> {
+    if (!conversation || !isFeishuChannel(conversation.channel)) {
+      return { text: "This action is only available from a Feishu conversation." };
+    }
+    const token = extractInteractiveToken(normalizeOptionDashes(args).trim() || "");
+    if (!token) {
+      return { text: "Invalid Codex card action." };
+    }
+    const callback = this.store.getCallback(token);
+    if (!callback) {
+      return { text: "That Codex action expired. Please retry the command." };
+    }
+    if (!isFeishuChannel(callback.conversation.channel)) {
+      return { text: "That Codex action is not valid in this channel." };
+    }
+    const callbackConversation: ConversationTarget = {
+      channel: "feishu",
+      accountId: callback.conversation.accountId ?? conversation?.accountId ?? "default",
+      conversationId:
+        normalizeFeishuConversationId(callback.conversation.conversationId) ??
+        callback.conversation.conversationId,
+      parentConversationId:
+        normalizeFeishuConversationId(callback.conversation.parentConversationId) ??
+        callback.conversation.parentConversationId,
+      threadId: callback.conversation.threadId,
+    };
+    const currentConversationId =
+      normalizeFeishuConversationId(conversation.conversationId) ?? conversation.conversationId;
+    if (currentConversationId !== callbackConversation.conversationId) {
+      return { text: "This Codex action belongs to another conversation." };
+    }
+    if ((conversation.accountId ?? "default") !== callbackConversation.accountId) {
+      return { text: "This Codex action belongs to another account." };
+    }
+    if (
+      callbackConversation.threadId != null &&
+      conversation.threadId != null &&
+      String(callbackConversation.threadId).trim() !== String(conversation.threadId).trim()
+    ) {
+      return { text: "This Codex action belongs to another thread." };
+    }
+    const callbackForDispatch: CallbackAction = {
+      ...callback,
+      conversation: callbackConversation,
+    };
+    let fallbackReply: ReplyPayload | null = null;
+    const fallbackTextReplies: string[] = [];
+    await this.dispatchCallbackAction(callbackForDispatch, {
+      conversation: callbackConversation,
+      acknowledge: async () => {},
+      clear: async () => {},
+      reply: async (text) => {
+        fallbackTextReplies.push(text);
+      },
+      editPicker: async (picker) => {
+        fallbackReply = buildReplyWithButtons(picker.text, picker.buttons);
+      },
+      requestConversationBinding: async (params) => {
+        const requestConversationBinding = bindingApi.requestConversationBinding;
+        if (!requestConversationBinding) {
+          return { status: "error", message: "Conversation binding is unavailable." } as const;
+        }
+        const result = await requestConversationBinding(params);
+        if (result.status === "pending") {
+          const buttons = extractReplyButtons(result.reply);
+          fallbackReply = buildReplyWithButtons(
+            result.reply.text ?? "Bind approval requested.",
+            buttons,
+          );
+          return { status: "pending", reply: result.reply } as const;
+        }
+        return result;
+      },
+      detachConversationBinding: bindingApi.detachConversationBinding,
+    });
+    if (fallbackTextReplies.length > 0) {
+      if (fallbackReply) {
+        const buttons = extractReplyButtons(fallbackReply);
+        if (buttons) {
+          return stripTopLevelText(buildReplyWithButtons(fallbackTextReplies.join("\n\n"), buttons));
+        }
+        const fallbackText = (fallbackReply as ReplyPayload).text ?? "";
+        return {
+          text: [fallbackTextReplies.join("\n\n"), fallbackText]
+            .filter((segment) => segment.trim().length > 0)
+            .join("\n\n"),
+        };
+      }
+      return {
+        text: fallbackTextReplies.join("\n\n"),
+      };
+    }
+    if (fallbackReply) {
+      if (extractReplyButtons(fallbackReply)) {
+        return stripTopLevelText(fallbackReply);
+      }
+      return fallbackReply;
+    }
+    if (callbackForDispatch.kind === "resume-thread") {
+      return {
+        text: `Resumed Codex thread ${callbackForDispatch.threadTitle || callbackForDispatch.threadId}.`,
+      };
+    }
+    return { text: "Action completed." };
+  }
+
   async handleCommand(commandName: string, ctx: PluginCommandContext): Promise<ReplyPayload> {
     await this.start();
     this.lastRuntimeConfig = ctx.config;
@@ -1703,9 +2058,14 @@ export class CodexPluginController {
           pendingBind,
           hydratedBinding?.pendingBind,
         );
+      case "cas_cb":
+        if (!conversation || !isFeishuChannel(conversation.channel)) {
+          return { text: "This command is only available in Feishu conversations." };
+        }
+        return await this.handleFeishuCardCallbackCommand(conversation, bindingApi, args);
       case "cas_detach":
         if (!conversation) {
-          return { text: "This command needs a Telegram or Discord conversation." };
+          return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
         }
         const detachResult = await bindingApi.detachConversationBinding?.();
         await this.unbindConversation(conversation);
@@ -1770,16 +2130,23 @@ export class CodexPluginController {
     requestConversationBinding?: PickerResponders["requestConversationBinding"],
   ): Promise<ReplyPayload> {
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     if (parsed.listProjects || !parsed.query) {
       const picker = await this.renderProjectPicker(conversation, binding, parsed, 0, "start-new-thread");
-      if (isDiscordChannel(channel) && picker.buttons) {
+      if (shouldSendPickerOutOfBand(channel) && picker.buttons) {
         try {
-          await this.sendDiscordPicker(conversation, picker);
-          return { text: "Sent a Codex project picker to this Discord conversation." };
+          const sent = await this.sendPickerToConversation(conversation, picker);
+          if (!sent) {
+            return buildReplyWithButtons(picker.text, picker.buttons);
+          }
+          return {
+            text: `Sent a Codex project picker to this ${formatChannelDisplayName(channel)} conversation.`,
+          };
         } catch (error) {
-          this.api.logger.warn(`codex discord picker send failed: ${String(error)}`);
+          this.api.logger.warn(
+            `codex ${channel} project picker send failed: ${String(error)}`,
+          );
           return { text: picker.text };
         }
       }
@@ -1789,14 +2156,22 @@ export class CodexPluginController {
     const workspaceDir = await this.resolveNewThreadWorkspaceDir(binding, parsed);
     if (!workspaceDir) {
       const picker = await this.renderProjectPicker(conversation, binding, parsed, 0, "start-new-thread");
-      if (isDiscordChannel(channel) && picker.buttons) {
+      if (shouldSendPickerOutOfBand(channel) && picker.buttons) {
         try {
-          await this.sendDiscordPicker(conversation, picker);
+          const sent = await this.sendPickerToConversation(conversation, picker);
+          if (!sent) {
+            return buildReplyWithButtons(picker.text, picker.buttons);
+          }
+          if (!shouldSendOutOfBandAck(channel)) {
+            return {};
+          }
           return {
-            text: `Multiple Codex projects matched "${parsed.query}". Sent a picker to this Discord conversation.`,
+            text: `Multiple Codex projects matched "${parsed.query}". Sent a picker to this ${formatChannelDisplayName(channel)} conversation.`,
           };
         } catch (error) {
-          this.api.logger.warn(`codex discord picker send failed: ${String(error)}`);
+          this.api.logger.warn(
+            `codex ${channel} project picker send failed: ${String(error)}`,
+          );
           return { text: picker.text };
         }
       }
@@ -1832,21 +2207,32 @@ export class CodexPluginController {
   ): Promise<ReplyPayload> {
     const parsed = parseThreadSelectionArgs(filter);
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const picker = parsed.listProjects
       ? await this.renderProjectPicker(conversation, binding, parsed, 0)
       : await this.renderThreadPicker(conversation, binding, parsed, 0);
-    if (isDiscordChannel(channel) && picker.buttons) {
+    if (shouldSendPickerOutOfBand(channel) && picker.buttons) {
       try {
-        await this.sendDiscordPicker(conversation, picker);
-        return { text: "Sent a Codex thread picker to this Discord conversation." };
+        const sent = await this.sendPickerToConversation(conversation, picker);
+        if (!sent) {
+          return buildReplyWithButtons(picker.text, picker.buttons);
+        }
+        if (!shouldSendOutOfBandAck(channel)) {
+          return {};
+        }
+        return {
+          text: `Sent a Codex thread picker to this ${formatChannelDisplayName(channel)} conversation.`,
+        };
       } catch (error) {
-        this.api.logger.warn(`codex discord picker send failed: ${String(error)}`);
+        this.api.logger.warn(
+          `codex ${channel} thread picker send failed: ${String(error)}`,
+        );
         return { text: picker.text };
       }
     }
-    return buildReplyWithButtons(picker.text, picker.buttons);
+    const reply = buildReplyWithButtons(picker.text, picker.buttons);
+    return isFeishuChannel(channel) ? stripTopLevelText(reply) : reply;
   }
 
   private async handleJoinCommand(
@@ -1860,7 +2246,7 @@ export class CodexPluginController {
   ): Promise<ReplyPayload> {
     const bindingApi = asScopedBindingApi(ctx);
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const parsed = parseThreadSelectionArgs(args);
     if (parsed.error) {
@@ -1964,14 +2350,22 @@ export class CodexPluginController {
     }
     if (selection.kind === "ambiguous") {
       const picker = await this.renderThreadPicker(conversation, binding, parsed, 0);
-      if (isDiscordChannel(channel) && picker.buttons) {
+      if (shouldSendPickerOutOfBand(channel) && picker.buttons) {
         try {
-          await this.sendDiscordPicker(conversation, picker);
+          const sent = await this.sendPickerToConversation(conversation, picker);
+          if (!sent) {
+            return buildReplyWithButtons(picker.text, picker.buttons);
+          }
+          if (!shouldSendOutOfBandAck(channel)) {
+            return {};
+          }
           return {
-            text: `Multiple Codex threads matched "${parsed.query}". Sent a picker to this Discord conversation.`,
+            text: `Multiple Codex threads matched "${parsed.query}". Sent a picker to this ${formatChannelDisplayName(channel)} conversation.`,
           };
         } catch (error) {
-          this.api.logger.warn(`codex discord picker send failed: ${String(error)}`);
+          this.api.logger.warn(
+            `codex ${channel} thread picker send failed: ${String(error)}`,
+          );
           return { text: picker.text };
         }
       }
@@ -2410,8 +2804,11 @@ export class CodexPluginController {
   private async sendPickerToConversation(
     conversation: ConversationTarget,
     picker: PickerRender,
-  ): Promise<void> {
-    await this.sendText(conversation, picker.text, { buttons: picker.buttons });
+  ): Promise<boolean> {
+    return await this.sendReply(conversation, {
+      text: picker.text,
+      buttons: picker.buttons,
+    });
   }
 
   private async updateStatusCardMessage(
@@ -2432,6 +2829,38 @@ export class CodexPluginController {
           reply_markup: buildTelegramReplyMarkup(statusCard.buttons) ?? { inline_keyboard: [] },
         });
         return true;
+      }
+      if (message.provider === "feishu") {
+        const editMessageFeishu = (
+          this.api.runtime.channel as unknown as {
+            feishu?: {
+              editMessageFeishu?: (
+                conversationId: string,
+                messageId: string,
+                params: { text?: string; buttons?: PluginInteractiveButtons },
+                opts?: { accountId?: string },
+              ) => Promise<unknown>;
+            };
+          }
+        ).feishu?.editMessageFeishu;
+        if (!editMessageFeishu) {
+          return false;
+        }
+        await editMessageFeishu(
+          message.conversationId,
+          message.messageId,
+          {
+            text: statusCard.text,
+            buttons: statusCard.buttons,
+          },
+          {
+            accountId: conversation.accountId,
+          },
+        );
+        return true;
+      }
+      if (message.provider !== "discord") {
+        return false;
       }
       const builtPicker = this.buildDiscordPickerMessage({
         text: statusCard.text,
@@ -2733,7 +3162,7 @@ export class CodexPluginController {
 
   private async handleStopCommand(conversation: ConversationTarget | null): Promise<ReplyPayload> {
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const active = this.activeRuns.get(buildConversationKey(conversation));
     if (!active) {
@@ -2748,7 +3177,7 @@ export class CodexPluginController {
     args: string,
   ): Promise<ReplyPayload> {
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const prompt = args.trim();
     if (!prompt) {
@@ -2768,7 +3197,7 @@ export class CodexPluginController {
     args: string,
   ): Promise<ReplyPayload> {
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const parsed = parsePlanArgs(args);
     if (parsed.mode === "off") {
@@ -2948,15 +3377,22 @@ export class CodexPluginController {
       page: 0,
       clickMode: "run",
     });
-    if (conversation && isDiscordChannel(conversation.channel) && picker.buttons) {
+    if (conversation && shouldSendPickerOutOfBand(conversation.channel) && picker.buttons) {
       try {
-        await this.sendReply(conversation, {
+        const sent = await this.sendReply(conversation, {
           text: picker.text,
           buttons: picker.buttons,
         });
-        return { text: "Sent Codex skills to this Discord conversation." };
+        if (!sent) {
+          return buildReplyWithButtons(picker.text, picker.buttons);
+        }
+        return {
+          text: `Sent Codex skills to this ${formatChannelDisplayName(conversation.channel)} conversation.`,
+        };
       } catch (error) {
-        this.api.logger.warn(`codex discord skills send failed: ${String(error)}`);
+        this.api.logger.warn(
+          `codex ${conversation.channel} skills send failed: ${String(error)}`,
+        );
         return { text: picker.text };
       }
     }
@@ -3053,15 +3489,22 @@ export class CodexPluginController {
         return { text: formatModels(models, effectiveState) };
       }
       const picker = await this.buildModelPicker(conversation, binding);
-      if (isDiscordChannel(conversation.channel) && picker.buttons) {
+      if (shouldSendPickerOutOfBand(conversation.channel) && picker.buttons) {
         try {
-          await this.sendReply(conversation, {
+          const sent = await this.sendReply(conversation, {
             text: picker.text,
             buttons: picker.buttons,
           });
-          return { text: "Sent Codex model choices to this Discord conversation." };
+          if (!sent) {
+            return buildReplyWithButtons(picker.text, picker.buttons);
+          }
+          return {
+            text: `Sent Codex model choices to this ${formatChannelDisplayName(conversation.channel)} conversation.`,
+          };
         } catch (error) {
-          this.api.logger.warn(`codex discord model picker send failed: ${String(error)}`);
+          this.api.logger.warn(
+            `codex ${conversation.channel} model picker send failed: ${String(error)}`,
+          );
           return { text: picker.text };
         }
       }
@@ -3119,7 +3562,7 @@ export class CodexPluginController {
     alias: string,
   ): Promise<ReplyPayload> {
     if (!conversation) {
-      return { text: "This command needs a Telegram or Discord conversation." };
+      return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
     }
     const workspaceDir = resolveWorkspaceDir({
       bindingWorkspaceDir: binding?.workspaceDir,
@@ -4454,17 +4897,18 @@ export class CodexPluginController {
       threads: pageResult.items,
       showProjectName: !projectName && (fallbackToGlobal || distinctProjects.size > 1),
       })) ?? [];
+    const introText = formatThreadPickerIntro({
+      page: pageResult.page,
+      totalPages: pageResult.totalPages,
+      totalItems: pageResult.totalItems,
+      includeAll: workspaceDir == null || fallbackToGlobal,
+      syncTopic: parsed.syncTopic,
+      workspaceDir: fallbackToGlobal ? undefined : workspaceDir,
+      projectName,
+      fallbackToGlobal,
+    });
     return {
-      text: formatThreadPickerIntro({
-        page: pageResult.page,
-        totalPages: pageResult.totalPages,
-        totalItems: pageResult.totalItems,
-        includeAll: workspaceDir == null || fallbackToGlobal,
-        syncTopic: parsed.syncTopic,
-        workspaceDir: fallbackToGlobal ? undefined : workspaceDir,
-        projectName,
-        fallbackToGlobal,
-      }),
+      text: introText,
       buttons: await this.appendThreadPickerControls({
             conversation,
             buttons: threadButtons,
@@ -4822,7 +5266,7 @@ export class CodexPluginController {
     responders: PickerResponders,
   ): Promise<void> {
     if (callback.kind === "start-new-thread") {
-      if (responders.conversation.channel !== "discord") {
+      if (!shouldSendPickerOutOfBand(responders.conversation.channel)) {
         await responders.clear().catch(() => undefined);
       }
       const result = await this.startNewThreadAndBindConversation(
@@ -4848,7 +5292,7 @@ export class CodexPluginController {
       return;
     }
     if (callback.kind === "resume-thread") {
-      if (responders.conversation.channel !== "discord") {
+      if (!shouldSendPickerOutOfBand(responders.conversation.channel)) {
         await responders.clear().catch(() => undefined);
       }
       const currentBinding = this.store.getBinding(callback.conversation);
@@ -4906,6 +5350,25 @@ export class CodexPluginController {
           await this.renameConversationIfSupported(responders.conversation, syncedName);
         }
       }
+      if (isFeishuChannel(responders.conversation.channel)) {
+        const messages = await this.buildBoundConversationMessages(callback.conversation);
+        for (const message of messages.slice(1)) {
+          await responders.reply(message);
+        }
+        const binding = this.store.getBinding(responders.conversation);
+        if (binding) {
+          const card = await this.buildStatusCard(responders.conversation, binding, true);
+          if (card.buttons) {
+            await responders.editPicker({
+              text: card.text,
+              buttons: card.buttons,
+            });
+          } else {
+            await responders.reply(card.text);
+          }
+        }
+        return;
+      }
       await this.sendBoundConversationNotifications(callback.conversation);
       return;
     }
@@ -4928,7 +5391,7 @@ export class CodexPluginController {
         return;
       }
       await this.store.removeCallback(callback.token);
-      if (callback.conversation.channel !== "discord") {
+      if (!shouldSendPickerOutOfBand(callback.conversation.channel)) {
         await responders.reply("Sent to Codex.");
       }
       return;
@@ -5024,7 +5487,7 @@ export class CodexPluginController {
         }
         await responders.clear().catch(() => undefined);
         await this.store.removePendingRequest(pending.requestId);
-        if (callback.conversation.channel !== "discord") {
+        if (!shouldSendPickerOutOfBand(callback.conversation.channel)) {
           await responders.reply("Recorded your answers and sent them to Codex.");
         }
         return;
@@ -5389,7 +5852,13 @@ export class CodexPluginController {
         binding,
         "",
       );
-      if (!(isDiscordChannel(callback.conversation.channel) && payload.text === "Sent Codex skills to this Discord conversation.")) {
+      if (
+        !(
+          shouldSendPickerOutOfBand(callback.conversation.channel) &&
+          typeof payload.text === "string" &&
+          payload.text.startsWith("Sent Codex skills to this ")
+        )
+      ) {
         await this.sendReplyPayloadToConversation(
           {
             ...callback.conversation,
@@ -5513,7 +5982,10 @@ export class CodexPluginController {
         },
       );
       await responders.acknowledge?.();
-      await this.sendPickerToConversation(conversation, picker);
+      const sent = await this.sendPickerToConversation(conversation, picker);
+      if (!sent) {
+        await responders.reply(picker.text);
+      }
       return;
     }
     if (callback.kind === "set-model") {
@@ -5868,6 +6340,7 @@ export class CodexPluginController {
         accountId: conversation.accountId,
         conversationId: conversation.conversationId,
         parentConversationId: conversation.parentConversationId,
+        threadId: conversation.threadId,
       },
       sessionKey,
       threadId: params.threadId,
@@ -5930,7 +6403,17 @@ export class CodexPluginController {
     | { status: "pending"; reply: ReplyPayload }
     | { status: "error"; message: string }
   > {
+    const bindDirectly = async (): Promise<
+      | { status: "bound"; binding: StoredBinding }
+      | { status: "error"; message: string }
+    > => {
+      const binding = await this.bindConversation(conversation, params);
+      return { status: "bound", binding };
+    };
     if (!requestBinding) {
+      if (isFeishuChannel(conversation.channel)) {
+        return await bindDirectly();
+      }
       return {
         status: "error",
         message: "This action can only bind from a live command or interactive context.",
@@ -5945,15 +6428,26 @@ export class CodexPluginController {
     const approval = await requestBinding({
       summary: `Bind this conversation to Codex thread ${params.threadTitle?.trim() || params.threadId}.`,
     });
+    if (
+      approval.status === "error" &&
+      isFeishuChannel(conversation.channel) &&
+      approval.message.toLowerCase().includes("cannot bind the current conversation")
+    ) {
+      this.api.logger.warn(
+        `codex feishu bind fallback activated ${this.formatConversationForLog(conversation)} reason=${approval.message}`,
+      );
+      return await bindDirectly();
+    }
     if (approval.status !== "bound") {
       if (approval.status === "pending") {
         await this.store.upsertPendingBind({
           conversation: {
             channel: conversation.channel,
             accountId: conversation.accountId,
-          conversationId: conversation.conversationId,
-          parentConversationId: conversation.parentConversationId,
-        },
+            conversationId: conversation.conversationId,
+            parentConversationId: conversation.parentConversationId,
+            threadId: conversation.threadId,
+          },
           threadId: params.threadId,
           workspaceDir: params.workspaceDir,
           permissionsMode: params.permissionsMode,
@@ -6011,6 +6505,7 @@ export class CodexPluginController {
       accountId: conversation.accountId,
       conversationId: conversation.conversationId,
       parentConversationId: conversation.parentConversationId,
+      threadId: "threadId" in conversation ? conversation.threadId : undefined,
     });
     if (!binding) {
       return ["No Codex binding for this conversation."];
@@ -6137,9 +6632,11 @@ export class CodexPluginController {
       parentConversationId: conversation.parentConversationId,
       threadId: "threadId" in conversation ? conversation.threadId : undefined,
     };
-    const messages = await this.buildBoundConversationMessages(conversation);
-    for (const message of messages.slice(1)) {
-      await this.sendText(target, message);
+    if (!isFeishuChannel(target.channel)) {
+      const messages = await this.buildBoundConversationMessages(conversation);
+      for (const message of messages.slice(1)) {
+        await this.sendText(target, message);
+      }
     }
     const binding = this.store.getBinding(target);
     if (!binding) {
@@ -6166,13 +6663,22 @@ export class CodexPluginController {
     buttons: PluginInteractiveButtons,
   ): Promise<ReplyPayload> {
     try {
-      await this.sendReplyWithDeliveryRef(conversation, {
+      const delivered = await this.sendReplyWithDeliveryRef(conversation, {
         text,
         buttons,
       });
-      return isDiscordChannel(conversation.channel)
-        ? { text: "Sent Codex status controls to this Discord conversation." }
-        : {};
+      if (!delivered) {
+        return { text };
+      }
+      if (shouldSendPickerOutOfBand(conversation.channel)) {
+        if (!shouldSendOutOfBandAck(conversation.channel)) {
+          return {};
+        }
+        return {
+          text: `Sent Codex status controls to this ${formatChannelDisplayName(conversation.channel)} conversation.`,
+        };
+      }
+      return {};
     } catch (error) {
       this.api.logger.warn(`codex ${conversation.channel} status card send failed: ${String(error)}`);
       return { text };
@@ -6295,6 +6801,67 @@ export class CodexPluginController {
     return delivered !== null;
   }
 
+  private buildFeishuInteractiveCard(
+    text: string,
+    buttons?: PluginInteractiveButtons,
+  ): Record<string, unknown> {
+    const elements: Array<Record<string, unknown>> = [];
+    if (text.trim()) {
+      elements.push({
+        tag: "markdown",
+        content: text,
+      });
+    }
+    for (const row of buttons ?? []) {
+      const actions = row
+        .map((button) => {
+          const token = extractInteractiveToken(button.callback_data);
+          if (!token) {
+            return null;
+          }
+          const type =
+            button.style === "danger"
+              ? "danger"
+              : button.style === "success"
+                ? "primary"
+                : "default";
+          return {
+            tag: "button",
+            text: {
+              tag: "plain_text",
+              content: button.text,
+            },
+            type,
+            value: {
+              command: `/cas_cb ${token}`,
+            },
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => Boolean(item));
+      if (actions.length > 0) {
+        elements.push({
+          tag: "action",
+          actions,
+        });
+      }
+    }
+    if (elements.length === 0) {
+      elements.push({
+        tag: "markdown",
+        content: "No actions available.",
+      });
+    }
+    return {
+      schema: "2.0",
+      config: {
+        wide_screen_mode: true,
+      },
+      body: {
+        elements,
+      },
+    };
+  }
+
   private async sendReplyWithDeliveryRef(
     conversation: ConversationTarget,
     payload: {
@@ -6312,6 +6879,8 @@ export class CodexPluginController {
       `codex outbound send start ${this.formatConversationForLog(conversation)} textChars=${text.length} media=${hasMedia ? "yes" : "no"} buttons=${payload.buttons?.length ?? 0} preview="${summarizeTextForLog(text, 80)}"`,
     );
     if (isTelegramChannel(conversation.channel)) {
+      const messageThreadId =
+        typeof conversation.threadId === "number" ? conversation.threadId : undefined;
       const mediaLocalRoots = this.resolveReplyMediaLocalRoots(payload.mediaUrl);
       const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
         undefined,
@@ -6329,7 +6898,7 @@ export class CodexPluginController {
           chunks[0] ?? text,
           {
             accountId: conversation.accountId,
-            messageThreadId: conversation.threadId,
+            messageThreadId,
             mediaUrl: payload.mediaUrl,
             mediaLocalRoots,
             buttons: chunks.length <= 1 ? payload.buttons : undefined,
@@ -6350,7 +6919,7 @@ export class CodexPluginController {
             chunk,
             {
               accountId: conversation.accountId,
-              messageThreadId: conversation.threadId,
+              messageThreadId,
               buttons: index === chunks.length - 1 ? payload.buttons : undefined,
             },
           );
@@ -6378,7 +6947,7 @@ export class CodexPluginController {
           chunk,
           {
             accountId: conversation.accountId,
-            messageThreadId: conversation.threadId,
+            messageThreadId,
             buttons: index === textChunks.length - 1 ? payload.buttons : undefined,
           },
         );
@@ -6392,6 +6961,117 @@ export class CodexPluginController {
       }
       this.api.logger.debug?.(
         `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=telegram chunks=${textChunks.length} media=no`,
+      );
+      return delivered;
+    }
+    if (isFeishuChannel(conversation.channel)) {
+      const feishuRuntime = (
+        this.api.runtime.channel as unknown as {
+          feishu?: {
+            sendMessageFeishu?: (
+              to: string,
+              text: string,
+              opts?: {
+                accountId?: string;
+                threadId?: string | number;
+                mediaUrl?: string;
+                mediaLocalRoots?: readonly string[];
+                buttons?: PluginInteractiveButtons;
+              },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+            sendCardFeishu?: (
+              to: string,
+              card: unknown,
+              opts?: {
+                accountId?: string;
+                threadId?: string | number;
+              },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+          };
+        }
+      );
+      const sendFeishuMessage = feishuRuntime.feishu?.sendMessageFeishu;
+      const sendFeishuCard = feishuRuntime.feishu?.sendCardFeishu;
+      if (!sendFeishuMessage) {
+        this.api.logger.warn(
+          "codex feishu outbound send skipped: runtime channel.feishu.sendMessageFeishu unavailable",
+        );
+        return null;
+      }
+      if (payload.buttons && payload.buttons.length > 0 && sendFeishuCard) {
+        const card = this.buildFeishuInteractiveCard(text, payload.buttons);
+        const cardResult = await sendFeishuCard(
+          conversation.conversationId,
+          card,
+          {
+            accountId: conversation.accountId,
+            threadId: conversation.threadId,
+          },
+        );
+        const delivered: DeliveredMessageRef = {
+          provider: "feishu",
+          messageId: cardResult.messageId,
+          conversationId: cardResult.conversationId || conversation.conversationId,
+        };
+        if (hasMedia) {
+          const mediaLocalRoots = this.resolveReplyMediaLocalRoots(payload.mediaUrl);
+          const mediaText = text && !text.trim() ? undefined : text;
+          await sendFeishuMessage(conversation.conversationId, mediaText ?? "", {
+            accountId: conversation.accountId,
+            threadId: conversation.threadId,
+            mediaUrl: payload.mediaUrl,
+            mediaLocalRoots,
+          });
+        }
+        return delivered;
+      }
+      const mediaLocalRoots = this.resolveReplyMediaLocalRoots(payload.mediaUrl);
+      const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
+        undefined,
+        "feishu",
+        conversation.accountId,
+        { fallbackLimit: 4000 },
+      );
+      const chunks = text
+        ? this.api.runtime.channel.text.chunkText(text, limit).filter(Boolean)
+        : [];
+      const textChunks = chunks.length > 0 ? chunks : [text];
+      let delivered: DeliveredMessageRef | null = null;
+      if (hasMedia) {
+        const firstChunk = textChunks.shift() ?? "";
+        const result = await sendFeishuMessage(conversation.conversationId, firstChunk, {
+          accountId: conversation.accountId,
+          threadId: conversation.threadId,
+          mediaUrl: payload.mediaUrl,
+          mediaLocalRoots,
+          buttons: textChunks.length === 0 ? payload.buttons : undefined,
+        });
+        delivered = {
+          provider: "feishu",
+          messageId: result.messageId,
+          conversationId: result.conversationId || conversation.conversationId,
+        };
+      }
+      for (let index = 0; index < textChunks.length; index += 1) {
+        const chunk = textChunks[index];
+        if (!chunk) {
+          continue;
+        }
+        const result = await sendFeishuMessage(conversation.conversationId, chunk, {
+          accountId: conversation.accountId,
+          threadId: conversation.threadId,
+          buttons: index === textChunks.length - 1 ? payload.buttons : undefined,
+        });
+        if (!delivered || index === textChunks.length - 1) {
+          delivered = {
+            provider: "feishu",
+            messageId: result.messageId,
+            conversationId: result.conversationId || conversation.conversationId,
+          };
+        }
+      }
+      this.api.logger.debug?.(
+        `codex outbound send complete ${this.formatConversationForLog(conversation)} channel=feishu chunks=${textChunks.length + (hasMedia ? 1 : 0)} media=${hasMedia ? "yes" : "no"}`,
       );
       return delivered;
     }
@@ -6577,7 +7257,31 @@ export class CodexPluginController {
       return await this.api.runtime.channel.telegram.typing.start({
         to: conversation.parentConversationId ?? conversation.conversationId,
         accountId: conversation.accountId,
-        messageThreadId: conversation.threadId,
+        messageThreadId:
+          typeof conversation.threadId === "number" ? conversation.threadId : undefined,
+      });
+    }
+    if (isFeishuChannel(conversation.channel)) {
+      const typing = (
+        this.api.runtime.channel as unknown as {
+          feishu?: {
+            typing?: {
+              start: (params: {
+                to: string;
+                accountId?: string;
+                threadId?: string | number;
+              }) => Promise<{ refresh: () => Promise<void>; stop: () => void }>;
+            };
+          };
+        }
+      ).feishu?.typing;
+      if (!typing?.start) {
+        return null;
+      }
+      return await typing.start({
+        to: conversation.parentConversationId ?? conversation.conversationId,
+        accountId: conversation.accountId,
+        threadId: conversation.threadId,
       });
     }
     if (isDiscordChannel(conversation.channel)) {
@@ -6614,6 +7318,8 @@ export class CodexPluginController {
       return null;
     }
     if (isTelegramChannel(conversation.channel)) {
+      const messageThreadId =
+        typeof conversation.threadId === "number" ? conversation.threadId : undefined;
       const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
         undefined,
         "telegram",
@@ -6629,7 +7335,7 @@ export class CodexPluginController {
           chunk,
           {
             accountId: conversation.accountId,
-            messageThreadId: conversation.threadId,
+            messageThreadId,
           },
         );
         if (!firstDelivered) {
@@ -6637,6 +7343,46 @@ export class CodexPluginController {
             provider: "telegram",
             messageId: result.messageId,
             chatId: result.chatId,
+          };
+        }
+      }
+      return firstDelivered;
+    }
+    if (isFeishuChannel(conversation.channel)) {
+      const feishuRuntime = (
+        this.api.runtime.channel as unknown as {
+          feishu?: {
+            sendMessageFeishu?: (
+              to: string,
+              text: string,
+              opts?: { accountId?: string; threadId?: string | number },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+          };
+        }
+      );
+      const sendFeishuMessage = feishuRuntime.feishu?.sendMessageFeishu;
+      if (!sendFeishuMessage) {
+        return null;
+      }
+      const limit = this.api.runtime.channel.text.resolveTextChunkLimit(
+        undefined,
+        "feishu",
+        conversation.accountId,
+        { fallbackLimit: 4000 },
+      );
+      const chunks = this.api.runtime.channel.text.chunkText(trimmed, limit).filter(Boolean);
+      const textChunks = chunks.length > 0 ? chunks : [trimmed];
+      let firstDelivered: DeliveredMessageRef | null = null;
+      for (const chunk of textChunks) {
+        const result = await sendFeishuMessage(conversation.conversationId, chunk, {
+          accountId: conversation.accountId,
+          threadId: conversation.threadId,
+        });
+        if (!firstDelivered) {
+          firstDelivered = {
+            provider: "feishu",
+            messageId: result.messageId,
+            conversationId: result.conversationId || conversation.conversationId,
           };
         }
       }
@@ -6702,7 +7448,7 @@ export class CodexPluginController {
           message_id: Number(delivered.messageId),
           disable_notification: true,
         });
-      } else {
+      } else if (delivered.provider === "discord") {
         const token = await this.resolveDiscordBotToken(conversation.accountId);
         if (!token) {
           this.api.logger.debug?.(
@@ -6711,6 +7457,11 @@ export class CodexPluginController {
           return;
         }
         await this.callDiscordPinApi("pin", token, delivered.channelId, delivered.messageId);
+      } else {
+        this.api.logger.debug?.(
+          `codex feishu pin skipped ${this.formatConversationForLog(conversation)} reason=unsupported`,
+        );
+        return;
       }
       await this.store.upsertBinding({
         ...binding,
@@ -6740,7 +7491,7 @@ export class CodexPluginController {
           chat_id: pinned.chatId,
           message_id: Number(pinned.messageId),
         });
-      } else {
+      } else if (pinned.provider === "discord") {
         const token = await this.resolveDiscordBotToken(binding.conversation.accountId);
         if (!token) {
           this.api.logger.debug?.(
@@ -6749,6 +7500,11 @@ export class CodexPluginController {
           return;
         }
         await this.callDiscordPinApi("unpin", token, pinned.channelId, pinned.messageId);
+      } else {
+        this.api.logger.debug?.(
+          `codex feishu unpin skipped conversation=${binding.conversation.conversationId} reason=unsupported`,
+        );
+        return;
       }
     } catch (error) {
       this.api.logger.warn(`codex binding message unpin failed: ${String(error)}`);
@@ -6840,7 +7596,7 @@ export class CodexPluginController {
     conversation: ConversationTarget,
     name: string,
   ): Promise<void> {
-    if (isTelegramChannel(conversation.channel) && conversation.threadId != null) {
+    if (isTelegramChannel(conversation.channel) && typeof conversation.threadId === "number") {
       await this.api.runtime.channel.telegram.conversationActions.renameTopic(
         conversation.parentConversationId ?? conversation.conversationId,
         conversation.threadId,
@@ -6864,6 +7620,36 @@ export class CodexPluginController {
         },
       ).catch((error) => {
         this.api.logger.warn(`codex discord channel rename failed: ${String(error)}`);
+      });
+      return;
+    }
+    if (isFeishuChannel(conversation.channel)) {
+      const renameConversation = (
+        this.api.runtime.channel as unknown as {
+          feishu?: {
+            conversationActions?: {
+              renameConversation?: (
+                conversationId: string,
+                params: { name?: string },
+                opts?: { accountId?: string },
+              ) => Promise<unknown>;
+            };
+          };
+        }
+      ).feishu?.conversationActions?.renameConversation;
+      if (!renameConversation) {
+        return;
+      }
+      await renameConversation(
+        conversation.conversationId,
+        {
+          name,
+        },
+        {
+          accountId: conversation.accountId,
+        },
+      ).catch((error) => {
+        this.api.logger.warn(`codex feishu conversation rename failed: ${String(error)}`);
       });
     }
   }

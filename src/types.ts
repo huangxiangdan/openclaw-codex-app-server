@@ -294,6 +294,11 @@ export type InteractiveMessageRef =
       provider: "discord";
       messageId: string;
       channelId: string;
+    }
+  | {
+      provider: "feishu";
+      messageId: string;
+      conversationId: string;
     };
 
 export type StoredPendingBind = {
@@ -569,7 +574,7 @@ export type StoreSnapshot = {
 };
 
 export type ConversationTarget = ConversationRef & {
-  threadId?: number;
+  threadId?: string | number;
 };
 
 export type CommandButtons = PluginInteractiveButtons;

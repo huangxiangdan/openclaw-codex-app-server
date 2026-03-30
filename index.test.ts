@@ -7,6 +7,7 @@ const controllerState = vi.hoisted(() => ({
   handleInboundClaim: vi.fn(),
   handleTelegramInteractive: vi.fn(),
   handleDiscordInteractive: vi.fn(),
+  handleFeishuInteractive: vi.fn(),
   handleCommand: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("./src/controller.js", () => ({
     handleInboundClaim = controllerState.handleInboundClaim;
     handleTelegramInteractive = controllerState.handleTelegramInteractive;
     handleDiscordInteractive = controllerState.handleDiscordInteractive;
+    handleFeishuInteractive = controllerState.handleFeishuInteractive;
     handleCommand = controllerState.handleCommand;
   },
 }));
@@ -35,10 +37,10 @@ describe("plugin registration", () => {
     expect(() => plugin.register(api as never)).not.toThrow();
     expect(api.registerService).toHaveBeenCalledTimes(1);
     expect(api.on).toHaveBeenCalledWith("inbound_claim", expect.any(Function));
-    expect(api.registerInteractiveHandler).toHaveBeenCalledTimes(2);
+    expect(api.registerInteractiveHandler).toHaveBeenCalledTimes(3);
     expect(api.registerCommand).toHaveBeenCalled();
     expect(api.registerCommand.mock.calls.map(([params]) => params.name)).toEqual(
-      COMMANDS.map(([name]) => name),
+      ["cas_cb", ...COMMANDS.map(([name]) => name)],
     );
   });
 
