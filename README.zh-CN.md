@@ -6,6 +6,14 @@
   - `https://github.com/huangxiangdan/openclaw-codex-app-server`
 - 飞书通道插件请使用这个仓库版本：
   - `https://github.com/huangxiangdan/openclaw-lark`
+- 当前推荐安装步骤：
+  - `git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git`
+  - `cd openclaw-codex-app-server`
+  - `pnpm install`
+  - `openclaw plugins install --link "$PWD"`
+  - `git clone https://github.com/huangxiangdan/openclaw-lark.git`
+  - `cd openclaw-lark && pnpm install && pnpm build`
+  - `openclaw plugins install --link "$PWD"`
 - 当前飞书集成依赖上面这个定制版 `openclaw-lark`，用于保证卡片发送和按钮回调可用。
 - 目前飞书按钮回调走的是内部 `/cas_cb` 桥接链路；这是当前可工作的正式方案。
 - 在当前测试过的 OpenClaw 运行时里，core 还没有补齐和 Telegram / Discord 对等的原生飞书 interactive 分发能力，所以这里保留桥接实现，不再强行切换。

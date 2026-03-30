@@ -8,6 +8,14 @@
   - `https://github.com/huangxiangdan/openclaw-codex-app-server`
 - For the Feishu channel plugin, use this repository build:
   - `https://github.com/huangxiangdan/openclaw-lark`
+- Current recommended install steps:
+  - `git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git`
+  - `cd openclaw-codex-app-server`
+  - `pnpm install`
+  - `openclaw plugins install --link "$PWD"`
+  - `git clone https://github.com/huangxiangdan/openclaw-lark.git`
+  - `cd openclaw-lark && pnpm install && pnpm build`
+  - `openclaw plugins install --link "$PWD"`
 - This Feishu integration currently depends on the custom `openclaw-lark` build above for card delivery and callback handling.
 - Current Feishu button callbacks use the internal `/cas_cb` bridge path. This works today and is the supported setup for this repository.
 - OpenClaw core does not yet provide a complete native Feishu interactive dispatch path equivalent to Telegram/Discord in the tested runtime, so the current bridge-based implementation is kept intentionally.
