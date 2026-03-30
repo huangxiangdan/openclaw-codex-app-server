@@ -58,10 +58,10 @@ openclaw plugins uninstall openclaw-codex-app-server
 
 预发布版本会发布到 npm 的 dist-tag（不是 `latest`）。例如 `v0.3.0-beta.1` 会发布为 `openclaw-codex-app-server@beta`，因此 `@latest` 仍保持稳定版本。
 
-从你的 GitHub 项目源码安装（当前飞书集成推荐）：
+从 GitHub 源码安装：
 
 ```bash
-git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git
+git clone https://github.com/pwrdrvr/openclaw-codex-app-server.git
 cd openclaw-codex-app-server
 openclaw plugins install --link "$PWD"
 ```
@@ -77,7 +77,7 @@ openclaw plugins uninstall openclaw-codex-app-server
 - 复用你现有的本地 Codex CLI，不需要额外托管桥接。
 - 聊天使用自然：`/cas_resume` 绑定一次，后续直接对话。
 - 常用控制近在手边：`/cas_status`、`/cas_plan`、`/cas_review` 等。
-- 适合把 Telegram / Discord / 飞书会话绑定到真实 Codex 线程。
+- 适合把 Telegram / Discord 会话绑定到真实 Codex 线程。
 
 ## 典型流程
 
@@ -87,22 +87,6 @@ openclaw plugins uninstall openclaw-codex-app-server
 4. 绑定后直接发送普通消息。
 5. 用 `/cas_status` 查看或调整当前绑定状态（模型、推理强度、fast、权限、compact、stop）。
 6. 若你通过正常按钮 `Implement this plan` 离开 plan 模式，不需要再执行 `/cas_plan off`；只有手动退出时才需要。
-
-## 飞书说明
-
-- 要获得完整飞书交互能力（卡片按钮 + 回调路由），请使用此飞书通道插件实现：`https://github.com/huangxiangdan/openclaw-lark`。
-- 飞书插件安装（npm）：`openclaw plugins install @larksuite/openclaw-lark`
-- 飞书插件安装（当前集成使用的 GitHub 源码）：
-  - `git clone https://github.com/huangxiangdan/openclaw-lark.git`
-  - `cd openclaw-lark && pnpm install && pnpm build`
-  - `openclaw plugins install --link "$PWD"`
-- 在当前集成方案中，飞书支持依赖上述插件；使用其他飞书插件构建可能出现“按钮缺失”或“点击无响应”。
-- `/cas_cb` 是飞书卡片动作使用的内部回调桥接命令，仅能在飞书会话中使用。
-- 飞书绑定按会话 + 线程（`threadId`）隔离，同一群多线程不会互相串状态。
-- 飞书卡片回调带有严格归属校验（会话 / 账号 / 线程），避免跨频道或跨线程重放。
-- 如果运行时 `channel.feishu.sendMessageFeishu` 不可用，插件会偏向单次响应卡片更新，减少重复消息/丢消息。
-- OpenClaw 运行时版本应与配置生成版本一致。如果 `openclaw.json` 是 `2026.3.28` 写入，尽量不要混用较老 CLI（例如 `2026.3.22`）。
-- 确认 OpenClaw 配置中飞书插件已启用：`plugins.entries.feishu.enabled = true`，否则卡片回调与交互流程不会正常工作。
 
 ## 命令参考
 

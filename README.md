@@ -60,10 +60,10 @@ OpenClaw `2026.3.22` and newer include the required binding and plugin interface
 
 Pre-release packages are published on matching npm dist-tags instead of `latest`. For example, a tag such as `v0.3.0-beta.1` publishes to `openclaw-codex-app-server@beta`, so `npm install openclaw-codex-app-server@latest` stays on the newest stable release.
 
-Install from this GitHub project (recommended for this Feishu integration setup):
+Install from this GitHub project:
 
 ```bash
-git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git
+git clone https://github.com/pwrdrvr/openclaw-codex-app-server.git
 cd openclaw-codex-app-server
 openclaw plugins install --link "$PWD"
 ```
@@ -79,7 +79,7 @@ openclaw plugins uninstall openclaw-codex-app-server
 - Uses your existing local Codex CLI setup instead of a separate hosted bridge.
 - Feels natural in chat: bind once with `/cas_resume`, then just talk.
 - Keeps useful controls close at hand with `/cas_status`, `/cas_plan`, `/cas_review`, and more.
-- Works well for Telegram, Discord, and Feishu conversations that you want tied to a real Codex thread.
+- Works well for Telegram and Discord conversations that you want tied to a real Codex thread.
 
 ## Typical Workflow
 
@@ -89,22 +89,6 @@ openclaw plugins uninstall openclaw-codex-app-server
 4. Send normal chat messages once the thread is bound.
 5. Use `/cas_status` to inspect or adjust the binding in place, including model, reasoning, fast mode, permissions, compact, and stop controls.
 6. If you leave plan mode through the normal `Implement this plan` button, you do not need `/cas_plan off`; use `/cas_plan off` only when you want to exit planning manually instead.
-
-## Feishu Notes
-
-- For full Feishu interactive support (card buttons + callback routing), use this Feishu channel plugin implementation: `https://github.com/huangxiangdan/openclaw-lark`.
-- Feishu plugin install (npm): `openclaw plugins install @larksuite/openclaw-lark`
-- Feishu plugin install (GitHub source used by this integration):
-  - `git clone https://github.com/huangxiangdan/openclaw-lark.git`
-  - `cd openclaw-lark && pnpm install && pnpm build`
-  - `openclaw plugins install --link "$PWD"`
-- In this integration setup, Feishu support is considered required to run with the plugin above. Using other Feishu plugin builds may cause missing buttons or non-responsive callbacks.
-- `/cas_cb` is an internal callback bridge for Feishu card actions and is only valid in Feishu conversations.
-- Feishu bindings are scoped by conversation and thread (`threadId`) so parallel threads in one chat do not share state.
-- Feishu card callbacks are handled with strict ownership checks (conversation/account/thread) to prevent cross-channel or cross-thread callback replay.
-- In environments where `channel.feishu.sendMessageFeishu` is unavailable, the plugin favors single-response card updates for interactive flows.
-- OpenClaw runtime should be aligned with your config generation version. If your `openclaw.json` was written by `2026.3.28`, avoid invoking an older bundled CLI (for example `2026.3.22`) in the same environment.
-- Ensure the Feishu plugin is enabled in OpenClaw config (`plugins.entries.feishu.enabled = true`), otherwise card callbacks and interactive flows will not work.
 
 ## Command Reference
 
