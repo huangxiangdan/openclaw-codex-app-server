@@ -14,6 +14,12 @@ type CommandHelpEntry = {
 };
 
 export const COMMAND_HELP: Record<CommandName, CommandHelpEntry> = {
+  cas: {
+    summary: COMMAND_SUMMARY.cas,
+    usage: "/cas",
+    examples: ["/cas"],
+    notes: "Shows a command menu with buttons. Tap a button to view detailed help for that command.",
+  },
   cas_resume: {
     summary: COMMAND_SUMMARY.cas_resume,
     usage: "/cas_resume [--projects|-p] [--new [project]] [--all|-a] [--cwd <path>] [--sync] [--model <name>] [--fast|--no-fast] [--yolo|--no-yolo] [filter]",

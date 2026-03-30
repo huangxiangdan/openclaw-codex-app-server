@@ -58,6 +58,7 @@ import {
   normalizeReasoningEffort,
   REASONING_EFFORT_OPTIONS,
 } from "./model-capabilities.js";
+import { COMMANDS } from "./commands.js";
 import { formatCommandUsage, renderCommandHelpText } from "./help.js";
 import type {
   AccountSummary,
@@ -2048,6 +2049,8 @@ export class CodexPluginController {
     }
 
     switch (commandName) {
+      case "cas":
+        return await this.handleCommandMenuCommand(conversation);
       case "cas_resume":
         return await this.handleJoinCommand(
           conversation,
@@ -2120,6 +2123,46 @@ export class CodexPluginController {
 
   private renderCommandHelp(commandName: string): ReplyPayload {
     return { text: renderCommandHelpText(commandName) };
+  }
+
+  private async handleCommandMenuCommand(
+    conversation: ConversationTarget | null,
+  ): Promise<ReplyPayload> {
+    if (!conversation) {
+      return {
+        text: [
+          "Supported Codex commands:",
+          ...COMMANDS.map(([commandName]) => `- /${commandName}`),
+        ].join("\n"),
+      };
+    }
+    const callbacks = await Promise.all(
+      COMMANDS.map(async ([commandName]) => ({
+        commandName,
+        token: (
+          await this.store.putCallback({
+            kind: "reply-text",
+            conversation,
+            text: renderCommandHelpText(commandName),
+          })
+        ).token,
+      })),
+    );
+    const buttons: PluginInteractiveButtons = [];
+    for (let index = 0; index < callbacks.length; index += 2) {
+      const row = callbacks
+        .slice(index, index + 2)
+        .map((entry) => ({
+          text: `/${entry.commandName}`,
+          callback_data: `${INTERACTIVE_NAMESPACE}:${entry.token}`,
+        }));
+      buttons.push(row);
+    }
+    const reply = buildReplyWithButtons(
+      "Supported Codex commands. Tap a button to view detailed help.",
+      buttons,
+    );
+    return isFeishuChannel(conversation.channel) ? stripTopLevelText(reply) : reply;
   }
 
   private async handleStartNewThreadSelection(

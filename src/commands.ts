@@ -1,4 +1,5 @@
 export const COMMANDS = [
+  ["cas", "Show a button menu of supported Codex commands."],
   ["cas_resume", "Resume or create a Codex thread, with optional model, fast mode, and permissions overrides."],
   ["cas_detach", "Detach this conversation from the current Codex thread."],
   ["cas_status", "Show Codex status and controls, or apply model, fast mode, and permissions overrides."],

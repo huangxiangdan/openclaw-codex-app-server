@@ -382,6 +382,30 @@ describe("Discord controller flows", () => {
     expect(renameHelp.text).toContain("Usage:");
   });
 
+  it("renders a /cas command menu with callback buttons for command help", async () => {
+    const { controller } = await createControllerHarness();
+
+    const reply = await controller.handleCommand("cas", buildTelegramCommandContext({
+      commandBody: "/cas",
+    }));
+
+    expect(reply.text).toContain("Supported Codex commands");
+    const buttons = (reply.channelData as any)?.telegram?.buttons;
+    expect(Array.isArray(buttons)).toBe(true);
+    const flatButtons = buttons.flat();
+    const resumeButton = flatButtons.find(
+      (button: { text: string; callback_data: string }) => button.text === "/cas_resume",
+    );
+    expect(resumeButton).toBeDefined();
+    const token = (resumeButton.callback_data as string).split(":").pop() ?? "";
+    const callback = (controller as any).store.getCallback(token);
+    expect(callback).toEqual(expect.objectContaining({
+      kind: "reply-text",
+    }));
+    expect(callback?.text).toContain("/cas_resume");
+    expect(callback?.text).toContain("Usage:");
+  });
+
   it("renders help when Telegram-style em dash is used for --help", async () => {
     const { controller } = await createControllerHarness();
 

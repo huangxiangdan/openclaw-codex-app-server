@@ -11,7 +11,7 @@
   </a>
 </p>
 
-This project has no product name. It is just an OpenClaw plugin that connects OpenClaw to the Codex App Server protocol so you can interact with your existing threads from Codex Desktop and Codex TUI through Telegram and Discord conversations.
+This project has no product name. It is just an OpenClaw plugin that connects OpenClaw to the Codex App Server protocol so you can interact with your existing threads from Codex Desktop and Codex TUI through Telegram, Discord, and Feishu conversations.
 
 `Codex` is mentioned here only to describe the protocol and toolchain this plugin connects to. This repository is independent and is not official, provided, sponsored, endorsed, or affiliated with OpenAI or Codex.
 
@@ -20,7 +20,7 @@ If `codex` already works on the machine running OpenClaw, this plugin should wor
 ## Quick Start
 
 1. Install the plugin into OpenClaw.
-2. Start in the Telegram or Discord conversation where you want the bridge bound.
+2. Start in the Telegram, Discord, or Feishu conversation where you want the bridge bound.
 3. Run `/cas_resume`.
 4. Pick a recent thread, click `New` to start a fresh one, or search directly.
 5. Once bound, plain text in that conversation routes to the selected Codex thread.
@@ -52,7 +52,7 @@ Pre-release packages are published on matching npm dist-tags instead of `latest`
 - Uses your existing local Codex CLI setup instead of a separate hosted bridge.
 - Feels natural in chat: bind once with `/cas_resume`, then just talk.
 - Keeps useful controls close at hand with `/cas_status`, `/cas_plan`, `/cas_review`, and more.
-- Works well for Telegram and Discord conversations that you want tied to a real Codex thread.
+- Works well for Telegram, Discord, and Feishu conversations that you want tied to a real Codex thread.
 
 ## Typical Workflow
 
@@ -63,10 +63,20 @@ Pre-release packages are published on matching npm dist-tags instead of `latest`
 5. Use `/cas_status` to inspect or adjust the binding in place, including model, reasoning, fast mode, permissions, compact, and stop controls.
 6. If you leave plan mode through the normal `Implement this plan` button, you do not need `/cas_plan off`; use `/cas_plan off` only when you want to exit planning manually instead.
 
+## Feishu Notes
+
+- `/cas_cb` is an internal callback bridge for Feishu card actions and is only valid in Feishu conversations.
+- Feishu bindings are scoped by conversation and thread (`threadId`) so parallel threads in one chat do not share state.
+- Feishu card callbacks are handled with strict ownership checks (conversation/account/thread) to prevent cross-channel or cross-thread callback replay.
+- In environments where `channel.feishu.sendMessageFeishu` is unavailable, the plugin favors single-response card updates for interactive flows.
+- OpenClaw runtime should be aligned with your config generation version. If your `openclaw.json` was written by `2026.3.28`, avoid invoking an older bundled CLI (for example `2026.3.22`) in the same environment.
+- Ensure the Feishu plugin is enabled in OpenClaw config (`plugins.entries.feishu.enabled = true`), otherwise card callbacks and interactive flows will not work.
+
 ## Command Reference
 
 | Command | What it does | Notes / examples |
 | --- | --- | --- |
+| `/cas` | Show a button menu of supported Codex commands. | Tap a button to view detailed help for that command. |
 | `/cas_resume` | Bind this conversation to a Codex thread. | With no args, opens a picker for recent threads in the current workspace and includes a `New` button. |
 | `/cas_resume --projects` | Browse projects first. | Opens a project picker, then a thread picker. |
 | `/cas_resume --new` | Start a fresh Codex thread in a project. | Opens a project picker instead of a thread picker. |
