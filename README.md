@@ -49,10 +49,10 @@ OpenClaw `2026.3.22` and newer include the required binding and plugin interface
 
 Pre-release packages are published on matching npm dist-tags instead of `latest`. For example, a tag such as `v0.3.0-beta.1` publishes to `openclaw-codex-app-server@beta`, so `npm install openclaw-codex-app-server@latest` stays on the newest stable release.
 
-Install from this repository source:
+Install from this GitHub project (recommended for this Feishu integration setup):
 
 ```bash
-git clone https://github.com/pwrdrvr/openclaw-codex-app-server.git
+git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git
 cd openclaw-codex-app-server
 openclaw plugins install --link "$PWD"
 ```

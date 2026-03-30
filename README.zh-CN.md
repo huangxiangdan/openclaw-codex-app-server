@@ -47,10 +47,10 @@ openclaw plugins uninstall openclaw-codex-app-server
 
 预发布版本会发布到 npm 的 dist-tag（不是 `latest`）。例如 `v0.3.0-beta.1` 会发布为 `openclaw-codex-app-server@beta`，因此 `@latest` 仍保持稳定版本。
 
-从当前仓库源码安装：
+从你的 GitHub 项目源码安装（当前飞书集成推荐）：
 
 ```bash
-git clone https://github.com/pwrdrvr/openclaw-codex-app-server.git
+git clone https://github.com/huangxiangdan/openclaw-codex-app-server.git
 cd openclaw-codex-app-server
 openclaw plugins install --link "$PWD"
 ```
