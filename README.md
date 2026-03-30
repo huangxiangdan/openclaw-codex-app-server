@@ -2,6 +2,17 @@
 
 中文版本：[`README.zh-CN.md`](./README.zh-CN.md)
 
+## Current Feishu Integration Notice
+
+- For the Feishu integration described in this repository, use this plugin repository build:
+  - `https://github.com/huangxiangdan/openclaw-codex-app-server`
+- For the Feishu channel plugin, use this repository build:
+  - `https://github.com/huangxiangdan/openclaw-lark`
+- This Feishu integration currently depends on the custom `openclaw-lark` build above for card delivery and callback handling.
+- Current Feishu button callbacks use the internal `/cas_cb` bridge path. This works today and is the supported setup for this repository.
+- OpenClaw core does not yet provide a complete native Feishu interactive dispatch path equivalent to Telegram/Discord in the tested runtime, so the current bridge-based implementation is kept intentionally.
+- When OpenClaw adds full native Feishu interactive support, this repository can migrate to that path later. Until then, keep the current setup unchanged if you need stable Feishu behavior.
+
 [![CI](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
 [![npm downloads](https://img.shields.io/npm/dm/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)

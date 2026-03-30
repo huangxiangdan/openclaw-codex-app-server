@@ -1,5 +1,16 @@
 # OpenClaw Codex App Server 插件
 
+## 当前飞书集成说明
+
+- 如果你要使用本仓库说明里的飞书集成方案，请使用这个插件仓库版本：
+  - `https://github.com/huangxiangdan/openclaw-codex-app-server`
+- 飞书通道插件请使用这个仓库版本：
+  - `https://github.com/huangxiangdan/openclaw-lark`
+- 当前飞书集成依赖上面这个定制版 `openclaw-lark`，用于保证卡片发送和按钮回调可用。
+- 目前飞书按钮回调走的是内部 `/cas_cb` 桥接链路；这是当前可工作的正式方案。
+- 在当前测试过的 OpenClaw 运行时里，core 还没有补齐和 Telegram / Discord 对等的原生飞书 interactive 分发能力，所以这里保留桥接实现，不再强行切换。
+- 如果未来 OpenClaw core 补上完整原生飞书 interactive 支持，本仓库后续可以再迁移；在此之前，如果你要稳定使用飞书，请保持当前方案不变。
+
 [![CI](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
 [![npm downloads](https://img.shields.io/npm/dm/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
