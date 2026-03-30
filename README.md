@@ -1,5 +1,7 @@
 # OpenClaw Plugin For Codex App Server
 
+中文版本：[`README.zh-CN.md`](./README.zh-CN.md)
+
 [![CI](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml/badge.svg)](https://github.com/pwrdrvr/openclaw-codex-app-server/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
 [![npm downloads](https://img.shields.io/npm/dm/openclaw-codex-app-server)](https://www.npmjs.com/package/openclaw-codex-app-server)
@@ -31,13 +33,13 @@ Buttons are presented for project and thread selection, model switching, and ski
 
 These are the intended install commands for OpenClaw `2026.3.22` and newer, which include the binding and plugin interface this package requires.
 
-Install:
+Install from npm (stable release):
 
 ```bash
 openclaw plugins install openclaw-codex-app-server
 ```
 
-Uninstall:
+Uninstall npm package:
 
 ```bash
 openclaw plugins uninstall openclaw-codex-app-server
@@ -46,6 +48,20 @@ openclaw plugins uninstall openclaw-codex-app-server
 OpenClaw `2026.3.22` and newer include the required binding and plugin interface changes. If you are testing before that release, use the local developer workflow at the bottom of this document.
 
 Pre-release packages are published on matching npm dist-tags instead of `latest`. For example, a tag such as `v0.3.0-beta.1` publishes to `openclaw-codex-app-server@beta`, so `npm install openclaw-codex-app-server@latest` stays on the newest stable release.
+
+Install from this repository source:
+
+```bash
+git clone https://github.com/pwrdrvr/openclaw-codex-app-server.git
+cd openclaw-codex-app-server
+openclaw plugins install --link "$PWD"
+```
+
+Uninstall linked local project:
+
+```bash
+openclaw plugins uninstall openclaw-codex-app-server
+```
 
 ## Why Try It
 
@@ -65,6 +81,13 @@ Pre-release packages are published on matching npm dist-tags instead of `latest`
 
 ## Feishu Notes
 
+- For full Feishu interactive support (card buttons + callback routing), use this Feishu channel plugin implementation: `https://github.com/huangxiangdan/openclaw-lark`.
+- Feishu plugin install (npm): `openclaw plugins install @larksuite/openclaw-lark`
+- Feishu plugin install (GitHub source used by this integration):
+  - `git clone https://github.com/huangxiangdan/openclaw-lark.git`
+  - `cd openclaw-lark && pnpm install && pnpm build`
+  - `openclaw plugins install --link "$PWD"`
+- In this integration setup, Feishu support is considered required to run with the plugin above. Using other Feishu plugin builds may cause missing buttons or non-responsive callbacks.
 - `/cas_cb` is an internal callback bridge for Feishu card actions and is only valid in Feishu conversations.
 - Feishu bindings are scoped by conversation and thread (`threadId`) so parallel threads in one chat do not share state.
 - Feishu card callbacks are handled with strict ownership checks (conversation/account/thread) to prevent cross-channel or cross-thread callback replay.
@@ -233,3 +256,7 @@ That override is for local development only. Do not commit the resulting `packag
 pnpm test
 pnpm typecheck
 ```
+
+## Chinese Version
+
+- Simplified Chinese README: [`README.zh-CN.md`](./README.zh-CN.md)
