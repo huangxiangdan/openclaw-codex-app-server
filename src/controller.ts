@@ -454,8 +454,20 @@ function toConversationTargetFromCommand(ctx: PluginCommandContext): Conversatio
     };
   }
   if (isFeishuChannel(ctx.channel)) {
-    const sourceId = ctx.to ?? ctx.from ?? ctx.senderId;
-    const conversationId = normalizeFeishuConversationId(sourceId);
+    const rawTo = ctx.to?.trim();
+    const rawFrom = ctx.from?.trim();
+    const sourceId = rawTo ?? rawFrom ?? ctx.senderId;
+    const normalizedSourceId = normalizeFeishuConversationId(sourceId);
+    const isExplicitGroup =
+      /^feishu:(group|chat|channel):/i.test(rawFrom ?? "") ||
+      /^(group|chat|channel):/i.test(rawTo ?? "") ||
+      /^(group|chat|channel):/i.test(normalizedSourceId ?? "");
+    const conversationId =
+      !isExplicitGroup &&
+      normalizedSourceId?.toLowerCase().startsWith("oc_") &&
+      ctx.senderId?.trim()
+        ? ctx.senderId.trim()
+        : normalizedSourceId;
     if (!conversationId) {
       return null;
     }

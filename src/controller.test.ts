@@ -464,7 +464,7 @@ describe("Discord controller flows", () => {
       conversation: {
         channel: "feishu",
         accountId: "default",
-        conversationId: "oc_test",
+        conversationId: "user-1",
       },
       commandName: "cas_model",
       args: "",
@@ -893,6 +893,33 @@ describe("Discord controller flows", () => {
     expect(binding?.permissionsMode).toBe("full-access");
     expect(binding?.preferences?.preferredModel).toBe("gpt-5.4");
     expect(binding?.preferences?.preferredServiceTier).toBe("fast");
+  });
+
+  it("binds Feishu DMs to the sender identity when slash context carries a chat id", async () => {
+    const { controller } = await createControllerHarness();
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildFeishuCommandContext({
+        senderId: "ou_user_1",
+        args: "thread-1",
+        commandBody: "/cas_resume thread-1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        requestConversationBinding: vi.fn(async () => ({
+          status: "error" as const,
+          message: "This command cannot bind the current conversation.",
+        })),
+      }),
+    );
+
+    expect(reply).toEqual({});
+    const binding = (controller as any).store.getBinding({
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
+    });
+    expect(binding?.threadId).toBe("thread-1");
   });
 
   it("preserves em-dash resume overrides through the no-query picker callback", async () => {
@@ -3382,6 +3409,40 @@ describe("Discord controller flows", () => {
       conversationId: "1481858418548412579",
       isGroup: true,
       metadata: { guildId: "guild-1" },
+    });
+
+    expect(result).toEqual({ handled: true });
+    expect(startTurn).toHaveBeenCalled();
+  });
+
+  it("claims inbound Feishu DM messages after a direct fallback bind from slash context", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    const startTurn = vi.fn(() => ({
+      result: Promise.resolve({
+        threadId: "thread-1",
+        text: "hello",
+      }),
+      getThreadId: () => "thread-1",
+      queueMessage: vi.fn(async () => true),
+    }));
+    (controller as any).client.startTurn = startTurn;
+
+    const result = await controller.handleInboundClaim({
+      content: "hello",
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
     });
 
     expect(result).toEqual({ handled: true });
