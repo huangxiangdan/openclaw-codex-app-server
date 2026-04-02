@@ -922,6 +922,79 @@ describe("Discord controller flows", () => {
     expect(binding?.threadId).toBe("thread-1");
   });
 
+  it("normalizes Feishu user-prefixed conversation ids during resume binding", async () => {
+    const { controller } = await createControllerHarness();
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildFeishuCommandContext({
+        senderId: "ou_user_2",
+        args: "thread-1",
+        commandBody: "/cas_resume thread-1",
+        from: "feishu:user:ou_user_2",
+        to: "feishu:user:ou_user_2",
+        requestConversationBinding: vi.fn(async () => ({
+          status: "error" as const,
+          message: "This command cannot bind the current conversation.",
+        })),
+      }),
+    );
+
+    expect(reply).toEqual({});
+    const binding = (controller as any).store.getBinding({
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_2",
+    });
+    expect(binding?.threadId).toBe("thread-1");
+  });
+
+  it("interrupts an existing Feishu active run when cas_resume rebinds the conversation", async () => {
+    const { controller } = await createControllerHarness();
+    const interrupt = vi.fn(async () => {});
+    const queueMessage = vi.fn(async () => true);
+    (controller as any).activeRuns.set("feishu::default::ou_user_2::", {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_2",
+      },
+      workspaceDir: "/repo/old",
+      mode: "default",
+      profile: "default",
+      handle: {
+        interrupt,
+        queueMessage,
+        getThreadId: () => "thread-old",
+      },
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_resume",
+      buildFeishuCommandContext({
+        senderId: "ou_user_2",
+        args: "thread-1",
+        commandBody: "/cas_resume thread-1",
+        from: "feishu:user:ou_user_2",
+        to: "feishu:user:ou_user_2",
+        requestConversationBinding: vi.fn(async () => ({
+          status: "error" as const,
+          message: "This command cannot bind the current conversation.",
+        })),
+      }),
+    );
+
+    expect(reply).toEqual({});
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect((controller as any).activeRuns.has("feishu::default::ou_user_2::")).toBe(false);
+    const binding = (controller as any).store.getBinding({
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_2",
+    });
+    expect(binding?.threadId).toBe("thread-1");
+  });
+
   it("preserves em-dash resume overrides through the no-query picker callback", async () => {
     const { controller } = await createControllerHarness();
 
@@ -2337,6 +2410,350 @@ describe("Discord controller flows", () => {
     );
   });
 
+  it("reports cas_detach success for Feishu when local binding exists even if runtime detach returns removed=false", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_detach",
+      buildFeishuCommandContext({
+        commandBody: "/cas_detach",
+        senderId: "ou_user_1",
+        from: "feishu:oc_test",
+        to: "feishu:oc_test",
+        detachConversationBinding: vi.fn(async () => ({ removed: false })),
+      }),
+    );
+
+    expect(reply).toEqual({ text: "Detached this conversation from Codex." });
+    expect(
+      (controller as any).store.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      }),
+    ).toBeNull();
+  });
+
+  it("interrupts the active run when cas_detach removes a Feishu binding", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const interrupt = vi.fn(async () => {});
+    (controller as any).activeRuns.set("feishu::default::ou_user_1::", {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      workspaceDir: "/repo/openclaw",
+      mode: "chat",
+      profile: "default",
+      handle: {
+        interrupt,
+        queueMessage: vi.fn(async () => true),
+        getThreadId: () => "thread-1",
+      },
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_detach",
+      buildFeishuCommandContext({
+        commandBody: "/cas_detach",
+        senderId: "ou_user_1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        detachConversationBinding: vi.fn(async () => ({ removed: false })),
+      }),
+    );
+
+    expect(reply).toEqual({ text: "Detached this conversation from Codex." });
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect((controller as any).activeRuns.has("feishu::default::ou_user_1::")).toBe(false);
+  });
+
+  it("does not let a detached Feishu conversation keep steering the previous active run", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const interrupt = vi.fn(async () => {});
+    const queueMessage = vi.fn(async () => true);
+    (controller as any).activeRuns.set("feishu::default::ou_user_1::", {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      workspaceDir: "/repo/openclaw",
+      mode: "chat",
+      profile: "default",
+      handle: {
+        interrupt,
+        queueMessage,
+        getThreadId: () => "thread-1",
+      },
+    });
+
+    await controller.handleCommand(
+      "cas_detach",
+      buildFeishuCommandContext({
+        commandBody: "/cas_detach",
+        senderId: "ou_user_1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        detachConversationBinding: vi.fn(async () => ({ removed: false })),
+      }),
+    );
+
+    const result = await controller.handleInboundClaim({
+      content: "still there?",
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
+    });
+
+    expect(queueMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ handled: false });
+  });
+
+  it("rejects a stale Feishu active run after detach even when the run record is still present", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    await (controller as any).store.removeBinding({
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
+    });
+    (controller as any).recentlyDetached.set("feishu::default::ou_user_1::", Date.now());
+
+    const interrupt = vi.fn(async () => {});
+    const queueMessage = vi.fn(async () => true);
+    (controller as any).activeRuns.set("feishu::default::ou_user_1::", {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      workspaceDir: "/repo/openclaw",
+      mode: "default",
+      profile: "default",
+      handle: {
+        interrupt,
+        queueMessage,
+        getThreadId: () => "thread-1",
+      },
+    });
+
+    const result = await controller.handleInboundClaim({
+      content: "test",
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
+      isGroup: false,
+    });
+
+    expect(result).toEqual({ handled: false });
+    expect(queueMessage).not.toHaveBeenCalled();
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect((controller as any).activeRuns.has("feishu::default::ou_user_1::")).toBe(false);
+  });
+
+  it("does not recreate a Feishu binding when a detached run finishes later", async () => {
+    const { controller } = await createControllerHarness();
+    const initialBinding = {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    } as const;
+    await (controller as any).store.upsertBinding(initialBinding);
+
+    let resolveResult: ((value: any) => void) | undefined;
+    const resultPromise = new Promise((resolve) => {
+      resolveResult = resolve;
+    });
+    const interrupt = vi.fn(async () => {});
+    (controller as any).client.startTurn = vi.fn(() => ({
+      result: resultPromise,
+      getThreadId: () => "thread-1",
+      queueMessage: vi.fn(async () => false),
+      interrupt,
+      isAwaitingInput: () => false,
+      submitPendingInput: vi.fn(async () => false),
+      submitPendingInputPayload: vi.fn(async () => false),
+    }));
+
+    await (controller as any).startTurn({
+      conversation: initialBinding.conversation,
+      binding: initialBinding,
+      workspaceDir: "/repo/openclaw",
+      prompt: "hello",
+      reason: "inbound",
+    });
+
+    await controller.handleCommand(
+      "cas_detach",
+      buildFeishuCommandContext({
+        commandBody: "/cas_detach",
+        senderId: "ou_user_1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        detachConversationBinding: vi.fn(async () => ({ removed: false })),
+      }),
+    );
+
+    resolveResult?.({
+      threadId: "thread-1",
+      text: "done",
+      terminalStatus: "completed",
+    });
+    await flushAsyncWork();
+
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect(
+      (controller as any).store.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      }),
+    ).toBeNull();
+  });
+
+  it("detaches all Feishu active runs and bindings for the same DM even when thread scopes differ", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+        threadId: "thread-scope",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    const interrupt = vi.fn(async () => {});
+    (controller as any).activeRuns.set("feishu::default::ou_user_1::thread-scope", {
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+        threadId: "thread-scope",
+      },
+      workspaceDir: "/repo/openclaw",
+      mode: "default",
+      profile: "default",
+      handle: {
+        result: Promise.resolve({ threadId: "thread-1", text: "done" }),
+        getThreadId: () => "thread-1",
+        queueMessage: vi.fn(async () => false),
+        interrupt,
+        isAwaitingInput: () => false,
+        submitPendingInput: vi.fn(async () => false),
+        submitPendingInputPayload: vi.fn(async () => false),
+      },
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_detach",
+      buildFeishuCommandContext({
+        commandBody: "/cas_detach",
+        senderId: "ou_user_1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        detachConversationBinding: vi.fn(async () => ({ removed: false })),
+      }),
+    );
+
+    expect(reply).toEqual({ text: "Detached this conversation from Codex." });
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect((controller as any).activeRuns.size).toBe(0);
+    expect(
+      (controller as any).store.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+        threadId: "thread-scope",
+      }),
+    ).toBeNull();
+  });
+
+  it("does not trust local Feishu fallback binding for status when core binding is absent", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      threadTitle: "Bound Thread",
+      updatedAt: Date.now(),
+    });
+
+    const reply = await controller.handleCommand(
+      "cas_status",
+      buildFeishuCommandContext({
+        commandBody: "/cas_status",
+        senderId: "ou_user_1",
+        from: "feishu:oc_dm_chat",
+        to: "feishu:oc_dm_chat",
+        getCurrentConversationBinding: vi.fn(async () => null),
+      }),
+    );
+
+    expect(reply.text).toContain("Binding: none");
+  });
+
   it("replays pending cas_resume --sync effects after approval hydrates on the next resume command", async () => {
     const { controller, clientMock, renameTopic, sendMessageTelegram } = await createControllerHarness();
     (controller as any).client.readThreadContext = vi.fn(async () => ({
@@ -3501,6 +3918,34 @@ describe("Discord controller flows", () => {
     expect(result).toEqual({ handled: false });
   });
 
+  it("does not claim Codex slash commands for bound Feishu conversations", async () => {
+    const { controller } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+    const startTurn = vi.fn();
+    (controller as any).client.startTurn = startTurn;
+
+    const result = await controller.handleInboundClaim({
+      content: "/cas",
+      channel: "feishu",
+      accountId: "default",
+      conversationId: "ou_user_1",
+      isGroup: false,
+    });
+
+    expect(result).toEqual({ handled: false });
+    expect(startTurn).not.toHaveBeenCalled();
+  });
+
   it("uses a raw Discord channel id for the typing lease on inbound claims", async () => {
     const { controller, discordTypingStart } = await createControllerHarness();
     await (controller as any).store.upsertBinding({
@@ -3727,6 +4172,89 @@ describe("Discord controller flows", () => {
         ],
       }),
     );
+  });
+
+  it("does not steer a completed run while its completion message is still sending", async () => {
+    const { controller, sendMessageTelegram } = await createControllerHarness();
+    await (controller as any).store.upsertBinding({
+      conversation: {
+        channel: "telegram",
+        accountId: "default",
+        conversationId: TEST_TELEGRAM_PEER_ID,
+      },
+      sessionKey: "session-1",
+      threadId: "thread-1",
+      workspaceDir: "/repo/openclaw",
+      updatedAt: Date.now(),
+    });
+
+    let resolveFirstSend: (() => void) | undefined;
+    sendMessageTelegram
+      .mockImplementationOnce(
+        async () =>
+          await new Promise<{ messageId: string; chatId: string }>((resolve) => {
+            resolveFirstSend = () => resolve({ messageId: "1", chatId: "123" });
+          }),
+      )
+      .mockResolvedValue({ messageId: "2", chatId: "123" });
+
+    const firstQueueMessage = vi.fn(async () => {
+      throw new Error("codex app server rpc error (-32600): no active turn to steer");
+    });
+    const startTurn = vi
+      .fn()
+      .mockImplementationOnce(() => ({
+        result: Promise.resolve({
+          threadId: "thread-1",
+          text: "first reply",
+        }),
+        getThreadId: () => "thread-1",
+        queueMessage: firstQueueMessage,
+        interrupt: vi.fn(async () => {}),
+        isAwaitingInput: () => false,
+        submitPendingInput: vi.fn(async () => false),
+        submitPendingInputPayload: vi.fn(async () => false),
+      }))
+      .mockImplementationOnce(() => ({
+        result: Promise.resolve({
+          threadId: "thread-1",
+          text: "second reply",
+        }),
+        getThreadId: () => "thread-1",
+        queueMessage: vi.fn(async () => true),
+        interrupt: vi.fn(async () => {}),
+        isAwaitingInput: () => false,
+        submitPendingInput: vi.fn(async () => false),
+        submitPendingInputPayload: vi.fn(async () => false),
+      }));
+    (controller as any).client.startTurn = startTurn;
+
+    const first = await controller.handleInboundClaim({
+      content: "first",
+      channel: "telegram",
+      accountId: "default",
+      conversationId: TEST_TELEGRAM_PEER_ID,
+      isGroup: false,
+    });
+    expect(first).toEqual({ handled: true });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const second = await controller.handleInboundClaim({
+      content: "second",
+      channel: "telegram",
+      accountId: "default",
+      conversationId: TEST_TELEGRAM_PEER_ID,
+      isGroup: false,
+    });
+
+    expect(second).toEqual({ handled: true });
+    expect(firstQueueMessage).not.toHaveBeenCalled();
+    expect(startTurn).toHaveBeenCalledTimes(2);
+
+    resolveFirstSend?.();
+    await Promise.resolve();
   });
 
   it("detects markdown attachments by file extension when mime metadata is absent", async () => {

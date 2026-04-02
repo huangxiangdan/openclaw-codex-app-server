@@ -152,6 +152,26 @@ function getSkillsPickerPageSize(channel: string): number {
   return channel === "discord" ? 6 : 8;
 }
 
+function parseSlashCommandName(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+  const raw = trimmed.slice(1).split(/\s+/, 1)[0]?.trim();
+  if (!raw) {
+    return null;
+  }
+  return raw.split("@", 1)[0]?.trim() || null;
+}
+
+function isCodexSlashCommand(text: string): boolean {
+  const commandName = parseSlashCommandName(text);
+  if (!commandName) {
+    return false;
+  }
+  return commandName === "cas_cb" || COMMANDS.some(([name]) => name === commandName);
+}
+
 function dedupeSkillsByName(skills: import("./types.js").SkillSummary[]): import("./types.js").SkillSummary[] {
   const seen = new Set<string>();
   const deduped = [];
@@ -398,12 +418,15 @@ function normalizeFeishuConversationId(raw: string | undefined): string | undefi
   if (!raw) {
     return undefined;
   }
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
   if (!trimmed) {
     return undefined;
   }
   if (trimmed.startsWith("feishu:")) {
-    return trimmed.slice("feishu:".length);
+    trimmed = trimmed.slice("feishu:".length);
+  }
+  if (trimmed.startsWith("user:")) {
+    trimmed = trimmed.slice("user:".length);
   }
   return trimmed;
 }
@@ -1359,6 +1382,7 @@ export class CodexPluginController {
   private readonly settings;
   private readonly client;
   private readonly activeRuns = new Map<string, ActiveRunRecord>();
+  private readonly recentlyDetached = new Map<string, number>();
   private readonly threadChangesCache = new Map<string, Promise<boolean | undefined>>();
   private readonly store;
   private serviceWorkspaceDir?: string;
@@ -1497,9 +1521,24 @@ export class CodexPluginController {
       if (!conversation) {
         return { handled: false };
       }
+      const conversationKey = buildConversationKey(conversation);
+      if (
+        isFeishuChannel(conversation.channel) &&
+        this.isConversationRecentlyDetached(conversation) &&
+        !this.store.getBinding(conversation)
+      ) {
+        await this.resetActiveRunForConversation(
+          conversation,
+          "after detach tombstone rejected stale active run",
+        );
+        return { handled: false };
+      }
+      if (isCodexSlashCommand(event.content)) {
+        return { handled: false };
+      }
       const input = await buildInboundTurnInput(event);
       const requiresStructuredInput = !isQueueCompatibleTurnInput(event.content, input);
-      const activeKey = buildConversationKey(conversation);
+      const activeKey = conversationKey;
       const active = this.activeRuns.get(activeKey);
       if (active) {
         if (active.mode === "plan") {
@@ -2042,13 +2081,15 @@ export class CodexPluginController {
         ? await bindingApi.getCurrentConversationBinding()
         : null;
     const pendingBind = conversation ? this.store.getPendingBind(conversation) : null;
-    const existingBinding =
-      conversation && currentBinding ? this.store.getBinding(conversation) : null;
+    const existingBinding = conversation ? this.store.getBinding(conversation) : null;
     const hydratedBinding =
       conversation && currentBinding && !existingBinding
         ? await this.hydrateApprovedBinding(conversation)
         : null;
-    const binding = existingBinding ?? hydratedBinding?.binding ?? null;
+    const binding =
+      currentBinding || hydratedBinding
+        ? existingBinding ?? hydratedBinding?.binding ?? null
+        : null;
     const args = ctx.args?.trim() ?? "";
     const normalizedArgs = normalizeOptionDashes(args).trim();
     if (normalizedArgs === "help" || normalizedArgs === "--help") {
@@ -2082,10 +2123,15 @@ export class CodexPluginController {
         if (!conversation) {
           return { text: "This command needs a Telegram, Discord, or Feishu conversation." };
         }
+        const hadBinding =
+          Boolean(binding) ||
+          this.store.listBindings().some((entry) =>
+            this.matchesDetachedConversation(entry.conversation, conversation),
+          );
         const detachResult = await bindingApi.detachConversationBinding?.();
-        await this.unbindConversation(conversation);
+        await this.detachConversation(conversation);
         return {
-          text: detachResult?.removed
+          text: hadBinding || detachResult?.removed
             ? "Detached this conversation from Codex."
             : "This conversation is not currently bound to Codex.",
         };
@@ -3912,34 +3958,46 @@ export class CodexPluginController {
     });
     void (run.result as Promise<import("./types.js").TurnResult>)
       .then(async (result) => {
+        this.activeRuns.delete(key);
         const threadId = result.threadId || run.getThreadId();
+        const currentBinding = this.store.getBinding(params.conversation);
+        const canPersistBinding =
+          (!isFeishuChannel(params.conversation.channel) ||
+            !this.isConversationRecentlyDetached(params.conversation)) &&
+          (!params.binding?.sessionKey || currentBinding?.sessionKey === params.binding.sessionKey);
         if (threadId) {
-          const state = await this.client
-            .readThreadState({
-              profile,
-              sessionKey: params.binding?.sessionKey,
+          if (canPersistBinding) {
+            const state = await this.client
+              .readThreadState({
+                profile,
+                sessionKey: params.binding?.sessionKey,
+                threadId,
+              })
+              .catch(() => null);
+            const nextBinding = await this.bindConversation(params.conversation, {
               threadId,
-            })
-            .catch(() => null);
-          const nextBinding = await this.bindConversation(params.conversation, {
-            threadId,
-            workspaceDir: state?.cwd || params.workspaceDir,
-            threadTitle: state?.threadName,
-            permissionsMode: profile,
-          });
-          if (state?.threadName && nextBinding.threadTitle !== state.threadName) {
-            await this.store.upsertBinding({
-              ...nextBinding,
-              threadTitle: state.threadName,
-              contextUsage: result.usage ?? nextBinding.contextUsage,
-              updatedAt: Date.now(),
+              workspaceDir: state?.cwd || params.workspaceDir,
+              threadTitle: state?.threadName,
+              permissionsMode: profile,
             });
-          } else if (result.usage) {
-            await this.store.upsertBinding({
-              ...nextBinding,
-              contextUsage: result.usage,
-              updatedAt: Date.now(),
-            });
+            if (state?.threadName && nextBinding.threadTitle !== state.threadName) {
+              await this.store.upsertBinding({
+                ...nextBinding,
+                threadTitle: state.threadName,
+                contextUsage: result.usage ?? nextBinding.contextUsage,
+                updatedAt: Date.now(),
+              });
+            } else if (result.usage) {
+              await this.store.upsertBinding({
+                ...nextBinding,
+                contextUsage: result.usage,
+                updatedAt: Date.now(),
+              });
+            }
+          } else {
+            this.api.logger.debug?.(
+              `codex turn completion skipped binding persistence ${this.formatConversationForLog(params.conversation)} thread=${threadId}`,
+            );
           }
         }
         this.api.logger.debug?.(
@@ -3962,6 +4020,7 @@ export class CodexPluginController {
         await this.sendText(params.conversation, completionText);
       })
       .catch(async (error) => {
+        this.activeRuns.delete(key);
         const message = error instanceof Error ? error.message : String(error);
         this.api.logger.warn(
           `codex turn failed ${this.formatConversationForLog(params.conversation)}: ${message}`,
@@ -5958,7 +6017,7 @@ export class CodexPluginController {
     if (callback.kind === "detach-thread") {
       await this.store.removeCallback(callback.token);
       await responders.detachConversationBinding?.().catch(() => undefined);
-      await this.unbindConversation(callback.conversation);
+      await this.detachConversation(callback.conversation);
       const statusCard = await this.buildStatusCard(
         {
           ...callback.conversation,
@@ -6489,7 +6548,24 @@ export class CodexPluginController {
       updatedAt: Date.now(),
     };
     await this.store.upsertBinding(record);
+    this.recentlyDetached.delete(buildConversationKey(conversation));
     return record;
+  }
+
+  private async resetActiveRunForConversation(
+    conversation: ConversationTarget,
+    reason: string,
+  ): Promise<void> {
+    const key = buildConversationKey(conversation);
+    const active = this.activeRuns.get(key);
+    if (!active) {
+      return;
+    }
+    this.api.logger.debug?.(
+      `codex clearing active run ${reason} ${this.formatConversationForLog(conversation)}`,
+    );
+    this.activeRuns.delete(key);
+    await active.handle.interrupt().catch(() => undefined);
   }
 
   private async hydrateApprovedBinding(
@@ -6540,6 +6616,7 @@ export class CodexPluginController {
       | { status: "bound"; binding: StoredBinding }
       | { status: "error"; message: string }
     > => {
+      await this.resetActiveRunForConversation(conversation, "before direct binding");
       const binding = await this.bindConversation(conversation, params);
       return { status: "bound", binding };
     };
@@ -6593,6 +6670,7 @@ export class CodexPluginController {
       }
       return approval;
     }
+    await this.resetActiveRunForConversation(conversation, "before binding approved conversation");
     const binding = await this.bindConversation(conversation, params);
     return { status: "bound", binding };
   }
@@ -7121,13 +7199,46 @@ export class CodexPluginController {
               },
             ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
           };
+          lark?: {
+            sendMessageLark?: (
+              to: string,
+              text: string,
+              opts?: {
+                accountId?: string;
+                threadId?: string | number;
+                mediaUrl?: string;
+                mediaLocalRoots?: readonly string[];
+                buttons?: PluginInteractiveButtons;
+              },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+            sendCardFeishu?: (
+              to: string,
+              card: unknown,
+              opts?: {
+                accountId?: string;
+                threadId?: string | number;
+              },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+            sendCardLark?: (
+              to: string,
+              card: unknown,
+              opts?: {
+                accountId?: string;
+                threadId?: string | number;
+              },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+          };
         }
       );
-      const sendFeishuMessage = feishuRuntime.feishu?.sendMessageFeishu;
-      const sendFeishuCard = feishuRuntime.feishu?.sendCardFeishu;
+      const sendFeishuMessage =
+        feishuRuntime.feishu?.sendMessageFeishu ?? feishuRuntime.lark?.sendMessageLark;
+      const sendFeishuCard =
+        feishuRuntime.feishu?.sendCardFeishu ??
+        feishuRuntime.lark?.sendCardFeishu ??
+        feishuRuntime.lark?.sendCardLark;
       if (!sendFeishuMessage) {
         this.api.logger.warn(
-          "codex feishu outbound send skipped: runtime channel.feishu.sendMessageFeishu unavailable",
+          "codex feishu outbound send skipped: runtime channel.feishu.sendMessageFeishu and channel.lark.sendMessageLark unavailable",
         );
         return null;
       }
@@ -7377,10 +7488,68 @@ export class CodexPluginController {
       await this.unpinStoredBindingMessage(binding);
     }
     await this.store.removeBinding(conversation);
+    if (isFeishuChannel(conversation.channel)) {
+      this.recentlyDetached.set(buildConversationKey(conversation), Date.now());
+    }
+  }
+
+  private async detachConversation(conversation: ConversationTarget): Promise<void> {
+    for (const [key, active] of this.activeRuns.entries()) {
+      const activeConversation = active.conversation;
+      if (
+        activeConversation &&
+        this.matchesDetachedConversation(activeConversation, conversation)
+      ) {
+        this.activeRuns.delete(key);
+        await active.handle.interrupt().catch(() => undefined);
+      }
+    }
+    for (const binding of this.store.listBindings()) {
+      if (this.matchesDetachedConversation(binding.conversation, conversation)) {
+        await this.unbindConversation(binding.conversation);
+      }
+    }
+    await this.store.clearConversationPendingStateForDetach(conversation);
+  }
+
+  private matchesDetachedConversation(
+    candidate: ConversationTarget,
+    requested: ConversationTarget,
+  ): boolean {
+    const sameConversation =
+      candidate.channel === requested.channel &&
+      candidate.accountId === requested.accountId &&
+      candidate.conversationId === requested.conversationId;
+    if (!sameConversation) {
+      return false;
+    }
+    if (isFeishuChannel(requested.channel)) {
+      return (
+        requested.threadId == null ||
+        candidate.threadId == null ||
+        String(candidate.threadId) === String(requested.threadId)
+      );
+    }
+    return (
+      String(candidate.threadId ?? "") === String(requested.threadId ?? "")
+    );
   }
 
   private async reconcileBindings(): Promise<void> {
     return;
+  }
+
+  private isConversationRecentlyDetached(conversation: ConversationTarget): boolean {
+    const key = buildConversationKey(conversation);
+    const timestamp = this.recentlyDetached.get(key);
+    if (!timestamp) {
+      return false;
+    }
+    if (Date.now() - timestamp > 60_000) {
+      this.recentlyDetached.delete(key);
+      return false;
+    }
+    return true;
   }
 
   private async startTypingLease(conversation: ConversationTarget): Promise<{
@@ -7491,9 +7660,17 @@ export class CodexPluginController {
               opts?: { accountId?: string; threadId?: string | number },
             ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
           };
+          lark?: {
+            sendMessageLark?: (
+              to: string,
+              text: string,
+              opts?: { accountId?: string; threadId?: string | number },
+            ) => Promise<{ messageId: string; conversationId?: string; chatId?: string }>;
+          };
         }
       );
-      const sendFeishuMessage = feishuRuntime.feishu?.sendMessageFeishu;
+      const sendFeishuMessage =
+        feishuRuntime.feishu?.sendMessageFeishu ?? feishuRuntime.lark?.sendMessageLark;
       if (!sendFeishuMessage) {
         return null;
       }

@@ -14,6 +14,57 @@ import type {
   StoredPendingRequest,
 } from "./types.js";
 
+function normalizeFeishuStoredConversation(target: ConversationTarget): ConversationTarget {
+  if (target.channel.trim().toLowerCase() !== "feishu") {
+    return target;
+  }
+  const normalizeId = (value?: string): string | undefined => {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+    if (trimmed.startsWith("feishu:")) {
+      return normalizeId(trimmed.slice("feishu:".length));
+    }
+    if (trimmed.startsWith("user:")) {
+      return normalizeId(trimmed.slice("user:".length));
+    }
+    return trimmed;
+  };
+  return {
+    ...target,
+    conversationId: normalizeId(target.conversationId) ?? target.conversationId,
+    parentConversationId: normalizeId(target.parentConversationId),
+    threadId:
+      typeof target.threadId === "string" ? target.threadId.trim() || undefined : target.threadId,
+  };
+}
+
+function isFeishuStoredConversation(target: ConversationTarget): boolean {
+  return target.channel.trim().toLowerCase() === "feishu";
+}
+
+function matchesDetachScope(
+  candidate: ConversationTarget,
+  requested: ConversationTarget,
+): boolean {
+  if (
+    candidate.channel !== requested.channel ||
+    candidate.accountId !== requested.accountId ||
+    candidate.conversationId !== requested.conversationId
+  ) {
+    return false;
+  }
+  if (isFeishuStoredConversation(requested)) {
+    return (
+      requested.threadId == null ||
+      candidate.threadId == null ||
+      String(candidate.threadId) === String(requested.threadId)
+    );
+  }
+  return String(candidate.threadId ?? "") === String(requested.threadId ?? "");
+}
+
 type PutCallbackInput =
   | {
       kind: "start-new-thread";
@@ -226,6 +277,23 @@ function cloneSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
   };
 }
 
+function dedupeByConversationKey<T extends { conversation: ConversationTarget }>(
+  entries: T[],
+  pickWinner: (current: T, incoming: T) => T,
+): T[] {
+  const map = new Map<string, T>();
+  for (const entry of entries) {
+    const normalized = {
+      ...entry,
+      conversation: normalizeFeishuStoredConversation(entry.conversation),
+    };
+    const key = toConversationKey(normalized.conversation);
+    const existing = map.get(key);
+    map.set(key, existing ? pickWinner(existing, normalized) : normalized);
+  }
+  return [...map.values()];
+}
+
 function normalizePermissionsMode(value?: string | null): PermissionsMode | undefined {
   return value === "full-access" ? "full-access" : value === "default" ? "default" : undefined;
 }
@@ -270,7 +338,9 @@ function normalizeConversationPreferences(
 function normalizeSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
   const snapshot = cloneSnapshot(value);
   snapshot.version = STORE_VERSION;
-  snapshot.bindings = snapshot.bindings.map((binding) => {
+  snapshot.bindings = dedupeByConversationKey(snapshot.bindings, (current, incoming) =>
+    incoming.updatedAt >= current.updatedAt ? incoming : current,
+  ).map((binding) => {
     const legacyPreferences = binding.preferences as
       | (ConversationPreferences & {
           preferredApprovalPolicy?: string;
@@ -295,7 +365,9 @@ function normalizeSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
       preferences: normalizeConversationPreferences(legacyPreferences),
     };
   });
-  snapshot.pendingBinds = snapshot.pendingBinds.map((entry) => {
+  snapshot.pendingBinds = dedupeByConversationKey(snapshot.pendingBinds, (current, incoming) =>
+    incoming.updatedAt >= current.updatedAt ? incoming : current,
+  ).map((entry) => {
     const legacyPreferences = entry.preferences as
       | (ConversationPreferences & {
           preferredApprovalPolicy?: string;
@@ -313,6 +385,13 @@ function normalizeSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
       preferences: normalizeConversationPreferences(legacyPreferences),
     };
   });
+  snapshot.pendingRequests = dedupeByConversationKey(snapshot.pendingRequests, (current, incoming) =>
+    incoming.updatedAt >= current.updatedAt ? incoming : current,
+  );
+  snapshot.callbacks = snapshot.callbacks.map((entry) => ({
+    ...entry,
+    conversation: normalizeFeishuStoredConversation(entry.conversation),
+  }));
   return snapshot;
 }
 
@@ -395,6 +474,33 @@ export class PluginStateStore {
     );
     this.snapshot.callbacks = this.snapshot.callbacks.filter(
       (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    await this.save();
+  }
+
+  async clearConversationPendingState(target: ConversationTarget): Promise<void> {
+    const key = toConversationKey(target);
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    this.snapshot.pendingRequests = this.snapshot.pendingRequests.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    this.snapshot.callbacks = this.snapshot.callbacks.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    await this.save();
+  }
+
+  async clearConversationPendingStateForDetach(target: ConversationTarget): Promise<void> {
+    this.snapshot.pendingBinds = this.snapshot.pendingBinds.filter(
+      (entry) => !matchesDetachScope(entry.conversation, target),
+    );
+    this.snapshot.pendingRequests = this.snapshot.pendingRequests.filter(
+      (entry) => !matchesDetachScope(entry.conversation, target),
+    );
+    this.snapshot.callbacks = this.snapshot.callbacks.filter(
+      (entry) => !matchesDetachScope(entry.conversation, target),
     );
     await this.save();
   }

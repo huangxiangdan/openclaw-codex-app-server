@@ -413,4 +413,113 @@ describe("state store", () => {
       updatedAt: pendingBindUpdatedAt,
     });
   });
+
+  it("normalizes legacy Feishu conversation ids and deduplicates migrated records", async () => {
+    const dir = await makeStoreDir();
+    const stateDir = path.join(dir, "openclaw-codex-app-server");
+    const updatedAt = Date.now();
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.writeFile(
+      path.join(stateDir, "state.json"),
+      `${JSON.stringify({
+        version: 2,
+        bindings: [
+          {
+            conversation: {
+              channel: "feishu",
+              accountId: "default",
+              conversationId: "user:ou_user_1",
+            },
+            sessionKey: buildPluginSessionKey("thread-old"),
+            threadId: "thread-old",
+            workspaceDir: "/tmp/old",
+            updatedAt,
+          },
+          {
+            conversation: {
+              channel: "feishu",
+              accountId: "default",
+              conversationId: "ou_user_1",
+            },
+            sessionKey: buildPluginSessionKey("thread-new"),
+            threadId: "thread-new",
+            workspaceDir: "/tmp/new",
+            updatedAt: updatedAt + 1,
+          },
+        ],
+        pendingBinds: [
+          {
+            conversation: {
+              channel: "feishu",
+              accountId: "default",
+              conversationId: "feishu:user:ou_user_1",
+            },
+            threadId: "thread-pending",
+            workspaceDir: "/tmp/pending",
+            updatedAt,
+          },
+        ],
+        pendingRequests: [
+          {
+            requestId: "req-1",
+            conversation: {
+              channel: "feishu",
+              accountId: "default",
+              conversationId: "user:ou_user_1",
+            },
+            threadId: "thread-pending",
+            workspaceDir: "/tmp/pending",
+            state: {
+              requestId: "req-1",
+              options: ["yes"],
+              expiresAt: updatedAt + 60_000,
+            },
+            updatedAt,
+          },
+        ],
+        callbacks: [
+          {
+            token: "tok-1",
+            kind: "resume-thread",
+            conversation: {
+              channel: "feishu",
+              accountId: "default",
+              conversationId: "feishu:user:ou_user_1",
+            },
+            threadId: "thread-new",
+            workspaceDir: "/tmp/new",
+            createdAt: updatedAt,
+            expiresAt: updatedAt + 60_000,
+          },
+        ],
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const reloaded = await makeStore(dir);
+
+    expect(reloaded.listBindings()).toHaveLength(1);
+    expect(
+      reloaded.getBinding({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      })?.threadId,
+    ).toBe("thread-new");
+    expect(
+      reloaded.getPendingBind({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      })?.threadId,
+    ).toBe("thread-pending");
+    expect(
+      reloaded.getPendingRequestByConversation({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      })?.requestId,
+    ).toBe("req-1");
+    expect(reloaded.getCallback("tok-1")?.conversation.conversationId).toBe("ou_user_1");
+  });
 });
