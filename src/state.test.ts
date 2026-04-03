@@ -327,6 +327,40 @@ describe("state store", () => {
     expect(binding?.permissionsMode).toBe("full-access");
   });
 
+  it("persists detached Feishu conversations across reload and prunes expired entries", async () => {
+    const dir = await makeStoreDir();
+    const store = await makeStore(dir);
+    await store.markConversationDetached(
+      {
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      },
+      5_000,
+    );
+
+    const reloaded = await makeStore(dir);
+    expect(
+      reloaded.hasRecentlyDetachedConversation({
+        channel: "feishu",
+        accountId: "default",
+        conversationId: "ou_user_1",
+      }),
+    ).toBe(true);
+
+    reloaded.pruneExpired(Date.now() + 6_000);
+    expect(
+      reloaded.hasRecentlyDetachedConversation(
+        {
+          channel: "feishu",
+          accountId: "default",
+          conversationId: "ou_user_1",
+        },
+        Date.now() + 6_000,
+      ),
+    ).toBe(false);
+  });
+
   it("migrates legacy profile and permission fields into permissions mode", async () => {
     const dir = await makeStoreDir();
     const stateDir = path.join(dir, "openclaw-codex-app-server");

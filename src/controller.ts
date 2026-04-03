@@ -1382,7 +1382,6 @@ export class CodexPluginController {
   private readonly settings;
   private readonly client;
   private readonly activeRuns = new Map<string, ActiveRunRecord>();
-  private readonly recentlyDetached = new Map<string, number>();
   private readonly threadChangesCache = new Map<string, Promise<boolean | undefined>>();
   private readonly store;
   private serviceWorkspaceDir?: string;
@@ -1521,10 +1520,13 @@ export class CodexPluginController {
       if (!conversation) {
         return { handled: false };
       }
+      if (isFeishuChannel(conversation.channel)) {
+        await this.store.reload();
+      }
       const conversationKey = buildConversationKey(conversation);
       if (
         isFeishuChannel(conversation.channel) &&
-        this.isConversationRecentlyDetached(conversation) &&
+        this.store.hasRecentlyDetachedConversation(conversation) &&
         !this.store.getBinding(conversation)
       ) {
         await this.resetActiveRunForConversation(
@@ -3960,10 +3962,13 @@ export class CodexPluginController {
       .then(async (result) => {
         this.activeRuns.delete(key);
         const threadId = result.threadId || run.getThreadId();
+        if (isFeishuChannel(params.conversation.channel)) {
+          await this.store.reload();
+        }
         const currentBinding = this.store.getBinding(params.conversation);
         const canPersistBinding =
           (!isFeishuChannel(params.conversation.channel) ||
-            !this.isConversationRecentlyDetached(params.conversation)) &&
+            !this.store.hasRecentlyDetachedConversation(params.conversation)) &&
           (!params.binding?.sessionKey || currentBinding?.sessionKey === params.binding.sessionKey);
         if (threadId) {
           if (canPersistBinding) {
@@ -6548,7 +6553,9 @@ export class CodexPluginController {
       updatedAt: Date.now(),
     };
     await this.store.upsertBinding(record);
-    this.recentlyDetached.delete(buildConversationKey(conversation));
+    if (isFeishuChannel(conversation.channel)) {
+      await this.store.clearDetachedConversation(conversation);
+    }
     return record;
   }
 
@@ -7489,7 +7496,7 @@ export class CodexPluginController {
     }
     await this.store.removeBinding(conversation);
     if (isFeishuChannel(conversation.channel)) {
-      this.recentlyDetached.set(buildConversationKey(conversation), Date.now());
+      await this.store.markConversationDetached(conversation);
     }
   }
 
@@ -7537,19 +7544,6 @@ export class CodexPluginController {
 
   private async reconcileBindings(): Promise<void> {
     return;
-  }
-
-  private isConversationRecentlyDetached(conversation: ConversationTarget): boolean {
-    const key = buildConversationKey(conversation);
-    const timestamp = this.recentlyDetached.get(key);
-    if (!timestamp) {
-      return false;
-    }
-    if (Date.now() - timestamp > 60_000) {
-      this.recentlyDetached.delete(key);
-      return false;
-    }
-    return true;
   }
 
   private async startTypingLease(conversation: ConversationTarget): Promise<{

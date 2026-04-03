@@ -274,6 +274,7 @@ function cloneSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
     pendingBinds: value?.pendingBinds ?? [],
     pendingRequests: value?.pendingRequests ?? [],
     callbacks: value?.callbacks ?? [],
+    detachedConversations: value?.detachedConversations ?? [],
   };
 }
 
@@ -392,6 +393,13 @@ function normalizeSnapshot(value?: Partial<StoreSnapshot>): StoreSnapshot {
     ...entry,
     conversation: normalizeFeishuStoredConversation(entry.conversation),
   }));
+  snapshot.detachedConversations = dedupeByConversationKey(
+    (snapshot.detachedConversations ?? []).map((entry) => ({
+      ...entry,
+      conversation: normalizeFeishuStoredConversation(entry.conversation),
+    })),
+    (current, incoming) => (incoming.createdAt >= current.createdAt ? incoming : current),
+  );
   return snapshot;
 }
 
@@ -425,6 +433,10 @@ export class PluginStateStore {
     }
   }
 
+  async reload(): Promise<void> {
+    await this.load();
+  }
+
   async save(): Promise<void> {
     await fs.mkdir(this.dir, { recursive: true });
     await fs.writeFile(this.filePath, `${JSON.stringify(this.snapshot, null, 2)}\n`, "utf8");
@@ -438,6 +450,9 @@ export class PluginStateStore {
       (entry) => entry.state.expiresAt > now,
     );
     this.snapshot.callbacks = this.snapshot.callbacks.filter((entry) => entry.expiresAt > now);
+    this.snapshot.detachedConversations = this.snapshot.detachedConversations.filter(
+      (entry) => entry.expiresAt > now,
+    );
   }
 
   listBindings(): StoredBinding[] {
@@ -501,6 +516,42 @@ export class PluginStateStore {
     );
     this.snapshot.callbacks = this.snapshot.callbacks.filter(
       (entry) => !matchesDetachScope(entry.conversation, target),
+    );
+    await this.save();
+  }
+
+  async markConversationDetached(target: ConversationTarget, ttlMs = 60_000): Promise<void> {
+    const now = Date.now();
+    const normalized = normalizeFeishuStoredConversation(target);
+    const key = toConversationKey(normalized);
+    this.snapshot.detachedConversations = this.snapshot.detachedConversations.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
+    );
+    this.snapshot.detachedConversations.push({
+      conversation: normalized,
+      createdAt: now,
+      expiresAt: now + ttlMs,
+    });
+    await this.save();
+  }
+
+  hasRecentlyDetachedConversation(target: ConversationTarget, now = Date.now()): boolean {
+    const normalized = normalizeFeishuStoredConversation(target);
+    const key = toConversationKey(normalized);
+    const entry = this.snapshot.detachedConversations.find(
+      (candidate) => toConversationKey(candidate.conversation) === key,
+    );
+    if (!entry) {
+      return false;
+    }
+    return entry.expiresAt > now;
+  }
+
+  async clearDetachedConversation(target: ConversationTarget): Promise<void> {
+    const normalized = normalizeFeishuStoredConversation(target);
+    const key = toConversationKey(normalized);
+    this.snapshot.detachedConversations = this.snapshot.detachedConversations.filter(
+      (entry) => toConversationKey(entry.conversation) !== key,
     );
     await this.save();
   }

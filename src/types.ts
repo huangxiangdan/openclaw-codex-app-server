@@ -2,7 +2,7 @@ import type { ConversationRef, PluginInteractiveButtons } from "openclaw/plugin-
 
 export const PLUGIN_ID = "openclaw-codex-app-server";
 export const INTERACTIVE_NAMESPACE = "codexapp";
-export const STORE_VERSION = 2;
+export const STORE_VERSION = 4;
 export const CALLBACK_TOKEN_BYTES = 9;
 export const CALLBACK_TTL_MS = 30 * 60_000;
 export const PENDING_INPUT_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -580,6 +580,11 @@ export type StoreSnapshot = {
   pendingBinds: StoredPendingBind[];
   pendingRequests: StoredPendingRequest[];
   callbacks: CallbackAction[];
+  detachedConversations: Array<{
+    conversation: ConversationRef;
+    createdAt: number;
+    expiresAt: number;
+  }>;
 };
 
 export type ConversationTarget = ConversationRef & {
